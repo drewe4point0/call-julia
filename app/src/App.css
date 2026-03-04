@@ -222,6 +222,13 @@ h1 {
   transform: none;
 }
 
+.error-text {
+  margin-top: 12px;
+  color: #b91c1c;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .transcript {
   margin-top: 28px;
   width: 100%;

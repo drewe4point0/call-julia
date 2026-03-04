@@ -2,505 +2,852 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { spawn } = require('child_process');
+
+function loadEnvFile() {
+  const envPath = path.join(__dirname, '.env');
+  try {
+    const raw = fs.readFileSync(envPath, 'utf8');
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) {
+        continue;
+      }
+      const equalsAt = trimmed.indexOf('=');
+      if (equalsAt <= 0) {
+        continue;
+      }
+      const key = trimmed.slice(0, equalsAt).trim();
+      if (!key || process.env[key] !== undefined) {
+        continue;
+      }
+      let value = trimmed.slice(equalsAt + 1).trim();
+      if (
+        (value.startsWith('"') && value.endsWith('"')) ||
+        (value.startsWith("'") && value.endsWith("'"))
+      ) {
+        value = value.slice(1, -1);
+      }
+      process.env[key] = value;
+    }
+  } catch (_err) {}
+}
+
+loadEnvFile();
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '3mb' }));
 
-app.use((req, res, next) => {
-  if (!req.path.includes('swagger') && !req.path.includes('php') && !req.path.includes('.json') && req.path !== '/') {
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+const isVercelRuntime = process.env.VERCEL === '1';
+
+function resolvePathFromServerDir(input, fallbackAbsolute) {
+  if (!input) {
+    return fallbackAbsolute;
   }
-  next();
-});
+  if (path.isAbsolute(input)) {
+    return input;
+  }
+  return path.resolve(__dirname, input);
+}
+
+const defaultBrainDir = path.resolve(__dirname, '../brain');
+const brainDir = resolvePathFromServerDir(process.env.BRAIN_DIR, defaultBrainDir);
+const defaultMemoryDir = isVercelRuntime ? '/tmp/call-julia-memory' : path.join(brainDir, 'memory');
+const memoryDir = resolvePathFromServerDir(process.env.MEMORY_DIR, defaultMemoryDir);
+
+const config = {
+  port: Number(process.env.PORT || 3789),
+  corsOrigins: (process.env.CORS_ORIGINS || '*').split(',').map((item) => item.trim()).filter(Boolean),
+  defaultAgentId: process.env.ELEVENLABS_AGENT_ID || '',
+  elevenLabsApiKey: process.env.ELEVENLABS_API_KEY || '',
+  llmProvider: (process.env.LLM_PROVIDER || 'openai-compatible').toLowerCase(),
+  llmBaseUrl: process.env.LLM_BASE_URL || 'http://localhost:3456',
+  llmApiKey: process.env.LLM_API_KEY || '',
+  llmModel: process.env.LLM_MODEL || 'claude-sonnet-4-20250514',
+  anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
+  anthropicVersion: process.env.ANTHROPIC_VERSION || '2023-06-01',
+  llmMaxTokens: Number(process.env.LLM_MAX_TOKENS || 450),
+  telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
+  telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
+  imessageTo: process.env.IMESSAGE_TO || '',
+  enableIMessage: process.env.ENABLE_IMESSAGE === 'true',
+  brainDir,
+  memoryDir,
+  contextFiles: (process.env.CONTEXT_FILES || 'soul.md,claude.md,user.md,memories.md,memory.md,tools.md')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean),
+  recentMemoryFiles: Number(process.env.RECENT_MEMORY_FILES || 2),
+  timezone: process.env.TIMEZONE || 'America/Vancouver',
+  assistantName: process.env.ASSISTANT_NAME || 'Julia',
+};
+
+if (config.llmProvider === 'anthropic' && !config.anthropicApiKey) {
+  console.warn('[WARN] LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is missing.');
+}
+if (config.llmProvider === 'openai-compatible' && !config.llmBaseUrl) {
+  console.warn('[WARN] LLM_PROVIDER=openai-compatible but LLM_BASE_URL is missing.');
+}
 
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const origin = req.headers.origin;
+  const allowAll = config.corsOrigins.includes('*');
+  if (allowAll) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else if (origin && config.corsOrigins.includes(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, x-call-id');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  return next();
 });
 
-const WORKSPACE = '/Users/macminihome/.openclaw/workspace';
-const TELEGRAM_BOT_TOKEN = '8385013965:AAEPCGE-45bbTWwomL67JQwllKlkWh-HcHs';
-const TELEGRAM_CHAT_ID = '7125055530';
-
-// Claude Max proxy on localhost:3456 — routes through Claude CLI subscription
-const CLAUDE_PROXY = 'http://localhost:3456';
-
-// ElevenLabs API key for signed URL generation
-const ELEVENLABS_API_KEY = (() => {
-  try {
-    const cfg = JSON.parse(fs.readFileSync(path.join(process.env.HOME, '.openclaw/openclaw.json'), 'utf8'));
-    return cfg.skills?.entries?.sag?.apiKey || '';
-  } catch { return ''; }
-})();
-
-app.get('/signed-url', async (req, res) => {
-  try {
-    const agentId = req.query.agent_id || 'agent_5201khky212aetd8vjfd7rq473hb';
-    const response = await fetch(
-      `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${agentId}`,
-      { headers: { 'xi-api-key': ELEVENLABS_API_KEY } }
-    );
-    if (!response.ok) throw new Error(`ElevenLabs returned ${response.status}`);
-    const data = await response.json();
-    res.json(data);
-  } catch (err) {
-    console.error('[Julia] Signed URL error:', err.message);
-    res.status(500).json({ error: err.message });
+app.use((req, _res, next) => {
+  if (req.path === '/health') {
+    return next();
   }
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
+  return next();
 });
 
-// Helper: call Claude via the Max proxy (OpenAI-compatible API)
-async function callClaude(systemPrompt, messages, { stream = false, maxTokens = 400 } = {}) {
-  const body = {
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: maxTokens,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      ...messages
-    ],
-    stream
-  };
-
-  const response = await fetch(`${CLAUDE_PROXY}/v1/chat/completions`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
-  });
-
-  if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`${response.status} ${errText}`);
+function toSingleString(content) {
+  if (typeof content === 'string') {
+    return content;
   }
-
-  if (stream) {
-    return response; // Return the raw response for streaming
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === 'string') {
+          return item;
+        }
+        if (item && typeof item === 'object') {
+          if (typeof item.text === 'string') {
+            return item.text;
+          }
+          if (typeof item.content === 'string') {
+            return item.content;
+          }
+        }
+        return '';
+      })
+      .join('\n')
+      .trim();
   }
-
-  const data = await response.json();
-  return data.choices[0].message.content;
+  if (content && typeof content === 'object') {
+    if (typeof content.text === 'string') {
+      return content.text;
+    }
+    return JSON.stringify(content);
+  }
+  return '';
 }
 
-function loadContext() {
-  const files = ['SOUL.md', 'USER.md', 'MEMORY.md', 'TOOLS.md'];
-  let context = '';
-  for (const f of files) {
-    try { context += `\n\n=== ${f} ===\n` + fs.readFileSync(path.join(WORKSPACE, f), 'utf8'); } catch (e) {}
-  }
-  const now = new Date();
-  for (const offset of [0, 1]) {
-    const d = new Date(now - offset * 86400000).toISOString().split('T')[0];
-    try { context += `\n\n=== memory/${d}.md ===\n` + fs.readFileSync(path.join(WORKSPACE, `memory/${d}.md`), 'utf8'); } catch (e) {}
-  }
-  return context;
-}
-
-function sendTelegram(text) {
-  return new Promise((resolve, reject) => {
-    const data = JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text, parse_mode: 'Markdown' });
-    const req = https.request({
-      hostname: 'api.telegram.org',
-      path: `/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }
-    }, (res) => {
-      let body = '';
-      res.on('data', c => body += c);
-      res.on('end', () => { console.log(`  Telegram sent (${res.statusCode})`); resolve(body); });
-    });
-    req.on('error', reject);
-    req.write(data);
-    req.end();
-  });
-}
-
-function sendIMessage(to, message) {
-  const { spawn } = require('child_process');
-  const child = spawn('/opt/homebrew/bin/imsg', ['send', '--to', to, '--text', message], {
-    env: { ...process.env, PATH: '/opt/homebrew/bin:/usr/bin:/bin' },
-    detached: true,
-    stdio: 'ignore'
-  });
-  child.unref();
-  setTimeout(() => { try { child.kill(); } catch(e) {} }, 10000);
-  console.log(`  iMessage spawned to ${to}`);
-}
-
-let currentConversation = [];
-let executedActions = [];
-
-async function processActions(fullText) {
-  const structuredMatch = fullText.match(/\[ACTION\s+([^\]]+)\]/i);
-  if (!structuredMatch) {
-    const oldMatch = fullText.match(/\[ACTION:\s*([\s\S]*?)\]/i);
-    if (oldMatch) return processOldAction(oldMatch[1].trim());
-    return;
-  }
-  
-  const attrs = structuredMatch[1];
-  const type = (attrs.match(/type="([^"]+)"/i) || [])[1] || '';
-  const message = (attrs.match(/message="([^"]+)"/i) || [])[1] || '';
-  const channel = (attrs.match(/channel="([^"]+)"/i) || [])[1] || 'telegram';
-  
-  console.log(`  Action: type=${type}, channel=${channel}, message="${message.substring(0, 50)}"`);
-  executedActions.push({ type, channel, message: message.substring(0, 200), time: new Date().toISOString() });
-  
-  try {
-    if (type === 'joke') {
-      const joke = await callClaude(
-        'Generate ONE clever, raunchy/witty joke. Short, punchy. Surprise on the LAST word. No preamble, just the joke.',
-        [{ role: 'user', content: 'Give me a joke' }],
-        { maxTokens: 150 }
-      );
-      if (channel === 'imessage') sendIMessage('+17789957801', joke);
-      else await sendTelegram(joke);
-      console.log(`  Joke sent via ${channel}`);
+function normalizeMessages(messages) {
+  const normalized = [];
+  for (const message of messages || []) {
+    if (!message || !message.role) {
+      continue;
     }
-    else if (type === 'telegram') {
-      await sendTelegram(message || 'Hey Drewe! 👋');
+    if (message.role === 'system') {
+      continue;
     }
-    else if (type === 'imessage') {
-      sendIMessage('+17789957801', message || 'Hey Drewe! 👋');
+    const role = message.role === 'assistant' ? 'assistant' : 'user';
+    const content = toSingleString(message.content).trim();
+    if (!content) {
+      continue;
     }
-    else if (type === 'julia') {
-      const forwardMsg = `🎙️ Voice Julia → Main Julia:\n\n${message}\n\n⚡ This is an ACTION REQUEST from a voice call. Do this NOW — don't just acknowledge it. Take the action, then confirm to Drewe on Telegram when done.`;
-      await sendTelegram(forwardMsg);
-      console.log(`  Forwarded to main Julia: "${message.substring(0, 60)}"`);
-    }
-    else {
-      const forwardMsg = `🎙️ **Voice Julia → Main Julia:**\n${message || 'Voice request with no message'}`;
-      await sendTelegram(forwardMsg);
-    }
-  } catch (err) {
-    console.error(`  Action failed: ${err.message}`);
-  }
-}
-
-async function processOldAction(desc) {
-  const lower = desc.toLowerCase();
-  if (lower.includes('joke')) {
-    const joke = await callClaude(
-      'Generate ONE clever, raunchy/witty joke. Short, punchy. Surprise on the LAST word. No preamble, just the joke.',
-      [{ role: 'user', content: 'Give me a joke' }],
-      { maxTokens: 150 }
-    );
-    if (lower.includes('imessage')) sendIMessage('+17789957801', joke);
-    else await sendTelegram(joke);
-  } else {
-    if (lower.includes('imessage') || lower.includes('text') || lower.includes('sms')) {
-      sendIMessage('+17789957801', 'Hey Drewe! 👋');
+    const previous = normalized[normalized.length - 1];
+    if (previous && previous.role === role) {
+      previous.content = `${previous.content}\n${content}`.trim();
     } else {
-      await sendTelegram('Hey Drewe! 👋');
+      normalized.push({ role, content });
     }
   }
+  if (normalized.length === 0 || normalized[0].role !== 'user') {
+    normalized.unshift({ role: 'user', content: `Hey ${config.assistantName}` });
+  }
+  return normalized;
+}
+
+function tryRead(filePath) {
+  try {
+    return fs.readFileSync(filePath, 'utf8');
+  } catch (_err) {
+    return null;
+  }
+}
+
+function collectExistingContextFiles() {
+  const entries = [];
+  for (const fileName of config.contextFiles) {
+    const normalized = fileName.toLowerCase();
+    const variants = Array.from(
+      new Set([
+        fileName,
+        normalized,
+        fileName.toUpperCase(),
+        normalized.replace(/\.md$/, '.MD'),
+      ]),
+    );
+    for (const variant of variants) {
+      const fullPath = path.join(config.brainDir, variant);
+      const content = tryRead(fullPath);
+      if (content) {
+        entries.push({ label: variant, content });
+        break;
+      }
+    }
+  }
+  return entries;
+}
+
+function collectRecentMemoryFiles() {
+  try {
+    const files = fs
+      .readdirSync(config.memoryDir)
+      .filter((file) => file.toLowerCase().endsWith('.md'))
+      .sort()
+      .reverse()
+      .slice(0, Math.max(config.recentMemoryFiles, 0));
+    return files
+      .map((file) => {
+        const fullPath = path.join(config.memoryDir, file);
+        const content = tryRead(fullPath);
+        if (!content) {
+          return null;
+        }
+        return { label: path.join('memory', file), content };
+      })
+      .filter(Boolean);
+  } catch (_err) {
+    return [];
+  }
+}
+
+function clip(input, maxChars) {
+  if (!input) {
+    return '';
+  }
+  if (input.length <= maxChars) {
+    return input;
+  }
+  return `${input.slice(0, maxChars)}\n...[truncated]`;
+}
+
+function loadAssistantContext() {
+  const sections = [];
+  for (const item of collectExistingContextFiles()) {
+    sections.push(`=== ${item.label} ===\n${item.content}`);
+  }
+  for (const item of collectRecentMemoryFiles()) {
+    sections.push(`=== ${item.label} ===\n${item.content}`);
+  }
+  return clip(sections.join('\n\n'), 30000);
 }
 
 function buildSystemPrompt() {
-  return `You are Julia — Drewe's AI co-pilot, project manager, accountability partner, and friend. You are having a LIVE VOICE CONVERSATION.
+  return `You are ${config.assistantName}, in a live voice conversation.
 
-CRITICAL VOICE RULES:
-- NEVER output XML tags, thinking tags, or any markup
-- Keep responses SHORT (2-4 sentences unless more detail is asked for)
-- No markdown, no bullet points, no formatting — just natural speech
-- Be direct, warm, funny, occasionally weird
-- Push Drewe toward his goals
+Voice style rules:
+- Speak naturally; short answers by default (2-5 sentences).
+- No markdown, no XML, no code blocks.
+- Be direct, warm, and practical.
 
-ACTIONS — HOW TO GET THINGS DONE:
-You have action tags that trigger the backend. Drewe will NEVER hear them — they are stripped from speech.
-Put ONE action tag per response, on its own line at the very end.
+Action protocol:
+- If the user asks for a concrete task, include exactly ONE action tag at the very end:
+[ACTION type="telegram" message="..."]
+- Use concise actionable phrasing in message.
+- Only include an action tag when an action is actually requested.
 
-Available action types:
-1. type="telegram" — send a Telegram message
-2. type="imessage" — send an iMessage/text
-3. type="joke" — generate and send ONE joke (channel="telegram" or "imessage")
-4. type="julia" — FORWARD REQUEST TO MAIN JULIA. Use this for ANYTHING you can't do yourself: research, file changes, reminders, calendar, web search, behavior changes, memory updates, project work, habit tracking, etc.
+Current local time (${config.timezone}): ${new Date().toLocaleString('en-US', { timeZone: config.timezone })}
 
-Format: [ACTION type="TYPE" channel="CHANNEL" message="CONTENT"]
-
-Examples:
-- "send hello on Telegram" → [ACTION type="telegram" message="Hey Drewe! 👋"]
-- "text me via iMessage" → [ACTION type="imessage" message="Hey! 👋"]  
-- "send me a joke" → [ACTION type="joke" channel="telegram"]
-- "set a reminder for 3pm" → [ACTION type="julia" message="Set a reminder for Drewe at 3pm today"]
-- "remember that I prefer morning workouts" → [ACTION type="julia" message="Update memory: Drewe prefers morning workouts"]
-
-CRITICAL RULES:
-- Only ONE action tag per response. Never two.
-- For jokes: generate ONE joke only. Never send multiple.
-- When Drewe asks you to do something you can't handle directly, ALWAYS use type="julia" to forward it.
-- Be honest about your limitations — say "I'll have main Julia handle that" rather than pretending.
-
-Current date/time: ${new Date().toLocaleString('en-US', { timeZone: 'America/Vancouver' })}
-
-${loadContext()}`;
+Long-term assistant context:
+${loadAssistantContext()}`;
 }
 
-async function saveConversationToMemory() {
-  if (currentConversation.length < 2) return;
-  
-  const now = new Date();
-  const dateStr = now.toLocaleDateString('en-CA', { timeZone: 'America/Vancouver' });
-  const timeStr = now.toLocaleTimeString('en-US', { timeZone: 'America/Vancouver', hour: '2-digit', minute: '2-digit' });
-  const memFile = path.join(WORKSPACE, `memory/${dateStr}.md`);
-  
-  const lines = currentConversation.map(m => `- **${m.role === 'user' ? 'Drewe' : 'Julia'}**: ${m.content.substring(0, 200)}`).join('\n');
-  const actionLines = executedActions.length > 0
-    ? '\n**Actions already completed during call:**\n' + executedActions.map(a => `- ✅ ${a.type}: ${a.message || a.channel}`).join('\n')
-    : '';
-  const entry = `\n\n### Voice Call (${timeStr})\n${lines}${actionLines}\n`;
-  
-  try {
-    let existing = '';
-    try { existing = fs.readFileSync(memFile, 'utf8'); } catch(e) {}
-    fs.writeFileSync(memFile, existing + entry);
-    console.log(`  Voice conversation saved to ${memFile}`);
-  } catch(e) {
-    console.error(`  Failed to save voice conversation: ${e.message}`);
+async function* streamFromOpenAiCompatible(systemPrompt, messages) {
+  const payload = {
+    model: config.llmModel,
+    max_tokens: config.llmMaxTokens,
+    stream: true,
+    messages: [{ role: 'system', content: systemPrompt }, ...messages],
+  };
+
+  const headers = { 'Content-Type': 'application/json' };
+  if (config.llmApiKey) {
+    headers.Authorization = `Bearer ${config.llmApiKey}`;
   }
-  
-  // Generate summary via Claude Max proxy
-  try {
-    const transcript = currentConversation.map(m => `${m.role === 'user' ? 'Drewe' : 'Julia'}: ${m.content}`).join('\n');
-    const actionsAlreadyDone = executedActions.length > 0
-      ? '\n\nACTIONS ALREADY EXECUTED DURING THIS CALL (DO NOT repeat these):\n' + executedActions.map(a => `- ${a.type}: ${a.message || a.channel}`).join('\n')
-      : '\n\nNo actions were executed during this call.';
-    
-    const summary = await callClaude(
-      `You are summarizing a voice call between Drewe and Julia. Produce a brief that Main Julia can act on.
 
-FORMAT:
-📞 **Voice Call Summary** (TIME)
+  const response = await fetch(`${config.llmBaseUrl.replace(/\/$/, '')}/v1/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+  });
 
-**Key topics:** (1-3 bullet points)
-**Drewe's mood/state:** (one line)
-**New info/preferences:** (if any were mentioned)
-**Action items for Main Julia:** (ONLY items NOT already handled — see list below)
-
-If all action items were already handled during the call, say "None — all handled during call."
-Be concise. This goes straight to Main Julia's Telegram.`,
-      [{ role: 'user', content: `Transcript:\n${transcript}${actionsAlreadyDone}\n\nTime: ${timeStr}` }],
-      { maxTokens: 400 }
-    );
-    
-    await sendTelegram(summary);
-    console.log(`  Smart summary sent to Main Julia`);
-  } catch(e) {
-    console.error(`  Failed to generate/send summary: ${e.message}`);
-    try {
-      await sendTelegram(`📞 Voice call ended (${timeStr}). ${currentConversation.length} exchanges. ${executedActions.length} actions taken.`);
-    } catch(e2) {}
+  if (!response.ok) {
+    throw new Error(`LLM stream failed: ${response.status} ${await response.text()}`);
   }
-  
-  currentConversation = [];
-  executedActions = [];
+  if (!response.body) {
+    throw new Error('LLM stream failed: empty response body');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop() || '';
+    for (const frame of frames) {
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data:')) {
+          continue;
+        }
+        const data = line.slice(5).trim();
+        if (!data || data === '[DONE]') {
+          continue;
+        }
+        try {
+          const parsed = JSON.parse(data);
+          const chunk = parsed.choices?.[0]?.delta?.content;
+          if (typeof chunk === 'string' && chunk.length > 0) {
+            yield chunk;
+          }
+        } catch (_err) {}
+      }
+    }
+  }
+
+  if (buffer.trim().length > 0) {
+    for (const line of buffer.split('\n')) {
+      if (!line.startsWith('data:')) {
+        continue;
+      }
+      const data = line.slice(5).trim();
+      if (!data || data === '[DONE]') {
+        continue;
+      }
+      try {
+        const parsed = JSON.parse(data);
+        const chunk = parsed.choices?.[0]?.delta?.content;
+        if (typeof chunk === 'string' && chunk.length > 0) {
+          yield chunk;
+        }
+      } catch (_err) {}
+    }
+  }
 }
 
-let lastMessageTime = 0;
-setInterval(() => {
-  if (currentConversation.length >= 2 && lastMessageTime > 0 && (Date.now() - lastMessageTime) > 120000) {
-    console.log(`  Auto-save: ${Math.round((Date.now() - lastMessageTime)/1000)}s since last message`);
-    lastMessageTime = 0;
-    saveConversationToMemory();
-  }
-}, 15000);
+async function completeFromOpenAiCompatible(systemPrompt, messages) {
+  const payload = {
+    model: config.llmModel,
+    max_tokens: config.llmMaxTokens,
+    stream: false,
+    messages: [{ role: 'system', content: systemPrompt }, ...messages],
+  };
 
-function resetConversationTimer() {
-  lastMessageTime = Date.now();
+  const headers = { 'Content-Type': 'application/json' };
+  if (config.llmApiKey) {
+    headers.Authorization = `Bearer ${config.llmApiKey}`;
+  }
+
+  const response = await fetch(`${config.llmBaseUrl.replace(/\/$/, '')}/v1/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(`LLM call failed: ${response.status} ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  return toSingleString(data.choices?.[0]?.message?.content || '');
 }
 
-app.post('/v1/chat/completions', async (req, res) => {
-  const startTime = Date.now();
-  try {
-    const { messages, stream = true } = req.body;
-    
-    console.log(`[${new Date().toISOString()}] Chat: ${messages?.length || 0} msgs, stream=${stream}`);
-    
-    const lastUserMsg = messages?.filter(m => m.role === 'user').pop();
-    if (lastUserMsg) {
-      currentConversation.push({
-        role: 'user',
-        content: typeof lastUserMsg.content === 'string' ? lastUserMsg.content : JSON.stringify(lastUserMsg.content),
-        time: new Date().toISOString()
-      });
+function toAnthropicMessages(messages) {
+  return messages.map((message) => ({
+    role: message.role === 'assistant' ? 'assistant' : 'user',
+    content: [{ type: 'text', text: message.content }],
+  }));
+}
+
+async function* streamFromAnthropic(systemPrompt, messages) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': config.anthropicApiKey,
+      'anthropic-version': config.anthropicVersion,
+    },
+    body: JSON.stringify({
+      model: config.llmModel,
+      max_tokens: config.llmMaxTokens,
+      system: systemPrompt,
+      messages: toAnthropicMessages(messages),
+      stream: true,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Anthropic stream failed: ${response.status} ${await response.text()}`);
+  }
+  if (!response.body) {
+    throw new Error('Anthropic stream failed: empty response body');
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
     }
-    resetConversationTimer();
-    
-    const systemMsg = buildSystemPrompt();
-    const convMessages = [];
-    
-    for (const msg of (messages || [])) {
-      if (msg.role === 'system') continue;
-      convMessages.push({
-        role: msg.role === 'assistant' ? 'assistant' : 'user',
-        content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
-      });
-    }
-    
-    if (convMessages.length === 0 || convMessages[0].role !== 'user') {
-      convMessages.unshift({ role: 'user', content: 'Hey Julia' });
-    }
-    
-    // Ensure alternating roles
-    const cleanMessages = [];
-    for (const msg of convMessages) {
-      if (cleanMessages.length > 0 && cleanMessages[cleanMessages.length - 1].role === msg.role) {
-        cleanMessages[cleanMessages.length - 1].content += '\n' + msg.content;
-      } else {
-        cleanMessages.push(msg);
-      }
-    }
+    buffer += decoder.decode(value, { stream: true });
+    const frames = buffer.split('\n\n');
+    buffer = frames.pop() || '';
 
-    if (stream) {
-      res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Accel-Buffering', 'no');
-      
-      const streamId = `chatcmpl-${Date.now()}`;
-      let fullText = '';
-      let actionBuffer = '';
-      let inAction = false;
-
-      // Stream from Claude Max proxy
-      const proxyBody = {
-        model: 'claude-sonnet-4-20250514',
-        max_tokens: 400,
-        messages: [{ role: 'system', content: systemMsg }, ...cleanMessages],
-        stream: true
-      };
-
-      const proxyRes = await fetch(`${CLAUDE_PROXY}/v1/chat/completions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(proxyBody)
-      });
-
-      if (!proxyRes.ok) {
-        const errText = await proxyRes.text();
-        throw new Error(`Proxy error: ${proxyRes.status} ${errText}`);
-      }
-      
-      function sendChunk(text) {
-        if (!text) return;
-        res.write(`data: ${JSON.stringify({
-          id: streamId,
-          object: 'chat.completion.chunk',
-          created: Math.floor(Date.now() / 1000),
-          model: 'claude-sonnet-4-20250514',
-          choices: [{ index: 0, delta: { content: text }, finish_reason: null }]
-        })}\n\n`);
-      }
-
-      // Parse SSE from proxy
-      const reader = proxyRes.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-        
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue;
-          const data = line.slice(6).trim();
-          if (data === '[DONE]') continue;
-          
-          try {
-            const parsed = JSON.parse(data);
-            const text = parsed.choices?.[0]?.delta?.content;
-            if (!text) continue;
-            
-            fullText += text;
-            
-            // Strip thinking tags
-            if (text.includes('<thinking>') || text.includes('</thinking>')) continue;
-            
-            // Handle ACTION tags — buffer so they're never spoken
-            for (const char of text) {
-              if (char === '[' && !inAction) {
-                inAction = true;
-                actionBuffer = '[';
-              } else if (inAction) {
-                actionBuffer += char;
-                if (char === ']') {
-                  if (actionBuffer.match(/\[ACTION[: ]/i)) {
-                    inAction = false;
-                    actionBuffer = '';
-                  } else {
-                    sendChunk(actionBuffer);
-                    inAction = false;
-                    actionBuffer = '';
-                  }
-                }
-                if (actionBuffer.length > 500) {
-                  sendChunk(actionBuffer);
-                  inAction = false;
-                  actionBuffer = '';
-                }
-              } else {
-                sendChunk(char);
-              }
-            }
-          } catch (e) {}
+    for (const frame of frames) {
+      let eventType = '';
+      let data = '';
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) {
+          eventType = line.slice(6).trim();
+        }
+        if (line.startsWith('data:')) {
+          data = line.slice(5).trim();
         }
       }
-      
-      if (actionBuffer && !actionBuffer.match(/\[ACTION[: ]/i)) {
-        sendChunk(actionBuffer);
+      if (!data || !eventType) {
+        continue;
       }
-      
-      res.write(`data: ${JSON.stringify({
-        id: streamId, object: 'chat.completion.chunk',
-        created: Math.floor(Date.now() / 1000), model: 'claude-sonnet-4-20250514',
-        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }]
-      })}\n\n`);
-      res.write('data: [DONE]\n\n');
-      res.end();
-      
-      console.log(`  Done (${Date.now() - startTime}ms)`);
-      
-      const spokenStream = fullText.replace(/\[ACTION[:\s][^\]]*\]/gi, '').trim();
-      if (spokenStream) currentConversation.push({ role: 'assistant', content: spokenStream, time: new Date().toISOString() });
-      
-      await processActions(fullText);
-      
-    } else {
-      const text = await callClaude(systemMsg, cleanMessages, { maxTokens: 400 });
-      await processActions(text);
-      const spokenText = text.replace(/\[ACTION[:\s][^\]]*\]/gi, '').trim();
-      
-      if (spokenText) currentConversation.push({ role: 'assistant', content: spokenText, time: new Date().toISOString() });
-      
-      res.json({
-        id: `chatcmpl-${Date.now()}`, object: 'chat.completion',
-        created: Math.floor(Date.now() / 1000), model: 'claude-sonnet-4-20250514',
-        choices: [{ index: 0, message: { role: 'assistant', content: spokenText }, finish_reason: 'stop' }],
-        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-      });
+      if (eventType === 'content_block_delta') {
+        try {
+          const parsed = JSON.parse(data);
+          const text = parsed.delta?.text;
+          if (typeof text === 'string' && text.length > 0) {
+            yield text;
+          }
+        } catch (_err) {}
+      }
     }
+  }
+}
+
+async function completeFromAnthropic(systemPrompt, messages) {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': config.anthropicApiKey,
+      'anthropic-version': config.anthropicVersion,
+    },
+    body: JSON.stringify({
+      model: config.llmModel,
+      max_tokens: config.llmMaxTokens,
+      system: systemPrompt,
+      messages: toAnthropicMessages(messages),
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Anthropic call failed: ${response.status} ${await response.text()}`);
+  }
+  const data = await response.json();
+  return (data.content || [])
+    .filter((item) => item && item.type === 'text')
+    .map((item) => item.text || '')
+    .join('')
+    .trim();
+}
+
+async function* streamModel(systemPrompt, messages) {
+  if (config.llmProvider === 'anthropic') {
+    yield* streamFromAnthropic(systemPrompt, messages);
+    return;
+  }
+  yield* streamFromOpenAiCompatible(systemPrompt, messages);
+}
+
+async function completeModel(systemPrompt, messages) {
+  if (config.llmProvider === 'anthropic') {
+    return completeFromAnthropic(systemPrompt, messages);
+  }
+  return completeFromOpenAiCompatible(systemPrompt, messages);
+}
+
+function stripInternalTags(text) {
+  return text
+    .replace(/<thinking>[\s\S]*?<\/thinking>/gi, ' ')
+    .replace(/\[ACTION\s+[^\]]+\]/gi, ' ')
+    .replace(/\[ACTION:[^\]]+\]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseActionTag(tagText) {
+  const attrs = {};
+  const regex = /(\w+)="([^"]*)"/g;
+  let match = regex.exec(tagText);
+  while (match) {
+    attrs[match[1].toLowerCase()] = match[2];
+    match = regex.exec(tagText);
+  }
+  return {
+    type: (attrs.type || 'telegram').toLowerCase(),
+    message: (attrs.message || '').trim(),
+    channel: (attrs.channel || 'telegram').toLowerCase(),
+  };
+}
+
+function extractActions(text) {
+  const actions = [];
+  const regex = /\[ACTION\s+([^\]]+)\]/gi;
+  let match = regex.exec(text);
+  while (match) {
+    actions.push(parseActionTag(match[1]));
+    match = regex.exec(text);
+  }
+  const legacyRegex = /\[ACTION:\s*([^\]]+)\]/gi;
+  let legacyMatch = legacyRegex.exec(text);
+  while (legacyMatch) {
+    actions.push({
+      type: 'telegram',
+      channel: 'telegram',
+      message: legacyMatch[1].trim(),
+    });
+    legacyMatch = legacyRegex.exec(text);
+  }
+  return actions;
+}
+
+function sendTelegram(text) {
+  if (!config.telegramBotToken || !config.telegramChatId) {
+    return Promise.resolve(false);
+  }
+  return new Promise((resolve, reject) => {
+    const body = JSON.stringify({ chat_id: config.telegramChatId, text: text.slice(0, 4000) });
+    const request = https.request(
+      {
+        hostname: 'api.telegram.org',
+        path: `/bot${config.telegramBotToken}/sendMessage`,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      },
+      (response) => {
+        let raw = '';
+        response.on('data', (chunk) => {
+          raw += chunk;
+        });
+        response.on('end', () => {
+          if (response.statusCode && response.statusCode >= 400) {
+            return reject(new Error(`Telegram error ${response.statusCode}: ${raw}`));
+          }
+          return resolve(true);
+        });
+      },
+    );
+    request.on('error', reject);
+    request.write(body);
+    request.end();
+  });
+}
+
+function sendIMessage(text) {
+  if (!config.enableIMessage || !config.imessageTo) {
+    return;
+  }
+  const child = spawn('/opt/homebrew/bin/imsg', ['send', '--to', config.imessageTo, '--text', text], {
+    env: { ...process.env, PATH: '/opt/homebrew/bin:/usr/bin:/bin' },
+    detached: true,
+    stdio: 'ignore',
+  });
+  child.unref();
+}
+
+async function runActions(actions) {
+  for (const action of actions) {
+    try {
+      if (action.type === 'telegram' || action.type === 'julia') {
+        const defaultMessage = action.type === 'julia' ? 'Forwarded action from voice call.' : 'Action requested in voice call.';
+        await sendTelegram(action.message || defaultMessage);
+        continue;
+      }
+      if (action.type === 'imessage') {
+        sendIMessage(action.message || 'Action requested in voice call.');
+        continue;
+      }
+      if (action.type === 'joke') {
+        const jokePrompt = 'Tell exactly one short witty joke. No preamble.';
+        const joke = await completeModel('You are a sharp comedian.', [{ role: 'user', content: jokePrompt }]);
+        if (action.channel === 'imessage') {
+          sendIMessage(joke);
+        } else {
+          await sendTelegram(joke);
+        }
+        continue;
+      }
+      if (action.message) {
+        await sendTelegram(action.message);
+      }
+    } catch (error) {
+      console.error(`[Action] Failed type=${action.type}: ${error.message}`);
+    }
+  }
+}
+
+function buildOpenAIChunk(streamId, content) {
+  return {
+    id: streamId,
+    object: 'chat.completion.chunk',
+    created: Math.floor(Date.now() / 1000),
+    model: config.llmModel,
+    choices: [{ index: 0, delta: content ? { content } : {}, finish_reason: null }],
+  };
+}
+
+function getDateStamp() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: config.timezone });
+}
+
+function appendConversationMemory(summary, transcript, callId) {
+  const fileName = `${getDateStamp()}.md`;
+  const memoryFile = path.join(config.memoryDir, fileName);
+  const lines = transcript
+    .map((entry) => `- **${entry.role === 'julia' ? config.assistantName : 'User'}**: ${entry.text}`)
+    .join('\n');
+  const callLabel = callId ? ` (${callId})` : '';
+  const section = `\n\n### Voice Call${callLabel} — ${new Date().toLocaleString('en-US', {
+    timeZone: config.timezone,
+  })}\n${lines}\n\n### Summary\n${summary}\n`;
+  try {
+    fs.mkdirSync(config.memoryDir, { recursive: true });
+    fs.appendFileSync(memoryFile, section, 'utf8');
+    return { ok: true, file: memoryFile };
   } catch (error) {
-    console.error(`ERROR:`, error.message);
-    if (!res.headersSent) res.status(500).json({ error: { message: error.message } });
-    else { res.write('data: [DONE]\n\n'); res.end(); }
+    return { ok: false, error: error.message };
+  }
+}
+
+function normalizeTranscript(transcript) {
+  if (!Array.isArray(transcript)) {
+    return [];
+  }
+  return transcript
+    .map((entry) => {
+      const role = entry.role === 'julia' || entry.role === 'assistant' ? 'julia' : 'you';
+      const text = toSingleString(entry.text || entry.content || entry.message || '').trim();
+      if (!text) {
+        return null;
+      }
+      return { role, text: stripInternalTags(text).slice(0, 1200) };
+    })
+    .filter(Boolean);
+}
+
+async function summarizeTranscript(transcript) {
+  const transcriptText = transcript.map((entry) => `${entry.role === 'julia' ? config.assistantName : 'You'}: ${entry.text}`).join('\n');
+  const summaryPrompt = `Create a concise but complete call summary for memory capture and follow-up.
+
+Required format:
+1) One short paragraph on the core discussion.
+2) Bullet list of commitments or action items.
+3) Bullet list of any new preferences or personal context.
+
+If there are no commitments, write "- None." under action items.
+
+Transcript:
+${transcriptText}`;
+
+  const fallback = `Voice call finished with ${transcript.length} transcript lines.`;
+
+  try {
+    const summary = await completeModel(
+      'You produce concise, practical call summaries. No markdown headings.',
+      [{ role: 'user', content: summaryPrompt }],
+    );
+    return summary || fallback;
+  } catch (error) {
+    console.error(`[Summary] LLM summary failed: ${error.message}`);
+    return fallback;
+  }
+}
+
+async function finalizeConversation(req, res) {
+  const callId = (req.body?.callId || req.headers['x-call-id'] || '').toString().trim();
+  const transcript = normalizeTranscript(req.body?.transcript || []);
+
+  if (transcript.length < 2) {
+    return res.status(400).json({ error: 'Transcript must contain at least 2 messages.' });
+  }
+
+  const summary = await summarizeTranscript(transcript);
+
+  let telegramSent = false;
+  let telegramError = null;
+  try {
+    telegramSent = await sendTelegram(`📞 Voice call summary${callId ? ` (${callId})` : ''}\n\n${summary}`);
+  } catch (error) {
+    telegramError = error.message;
+  }
+
+  const memoryWrite = appendConversationMemory(summary, transcript, callId);
+
+  return res.json({
+    status: 'ok',
+    callId: callId || null,
+    summary,
+    telegram: { sent: telegramSent, error: telegramError },
+    memory: memoryWrite,
+  });
+}
+
+app.get('/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    provider: config.llmProvider,
+    model: config.llmModel,
+    brainDir: config.brainDir,
+    memoryDir: config.memoryDir,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.get('/signed-url', async (req, res) => {
+  try {
+    if (!config.elevenLabsApiKey) {
+      return res.status(500).json({ error: 'ELEVENLABS_API_KEY is not configured.' });
+    }
+    const agentId = (req.query.agent_id || config.defaultAgentId || '').toString().trim();
+    if (!agentId) {
+      return res.status(400).json({ error: 'Missing agent_id.' });
+    }
+
+    const endpoint = `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${encodeURIComponent(agentId)}`;
+    const response = await fetch(endpoint, {
+      headers: { 'xi-api-key': config.elevenLabsApiKey },
+    });
+    if (!response.ok) {
+      throw new Error(`ElevenLabs returned ${response.status} ${await response.text()}`);
+    }
+    const body = await response.json();
+    return res.json(body);
+  } catch (error) {
+    console.error(`[signed-url] ${error.message}`);
+    return res.status(500).json({ error: error.message });
   }
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', timestamp: new Date().toISOString(), conversationLength: currentConversation.length, actionsCount: executedActions.length }));
-app.post('/save-memory', async (req, res) => {
-  console.log(`  Manual save triggered. Conversation: ${currentConversation.length} msgs, Actions: ${executedActions.length}`);
-  await saveConversationToMemory();
-  res.json({ status: 'saved' });
-});
-app.use((req, res) => res.status(404).json({ error: 'Not found' }));
+app.post('/v1/chat/completions', async (req, res) => {
+  const start = Date.now();
+  const stream = req.body?.stream !== false;
+  try {
+    const messages = normalizeMessages(req.body?.messages || []);
+    const systemPrompt = buildSystemPrompt();
 
-app.listen(3789, () => {
-  console.log('[Julia] Voice LLM Server on port 3789');
-  console.log('[Julia] Routing through Claude Max proxy at localhost:3456');
-  console.log('[Julia] Tailscale: https://drewes-mac-mini.tail2e734a.ts.net');
+    if (!stream) {
+      const fullText = await completeModel(systemPrompt, messages);
+      const actions = extractActions(fullText);
+      const spoken = stripInternalTags(fullText);
+      await runActions(actions);
+      return res.json({
+        id: `chatcmpl-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: config.llmModel,
+        choices: [{ index: 0, message: { role: 'assistant', content: spoken }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      });
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+
+    const streamId = `chatcmpl-${Date.now()}`;
+    let fullText = '';
+    let actionBuffer = '';
+    let inAction = false;
+
+    for await (const chunk of streamModel(systemPrompt, messages)) {
+      fullText += chunk;
+      for (const char of chunk) {
+        if (char === '[' && !inAction) {
+          inAction = true;
+          actionBuffer = '[';
+          continue;
+        }
+        if (inAction) {
+          actionBuffer += char;
+          if (char === ']') {
+            if (!/^\[ACTION(\s+|:)/i.test(actionBuffer)) {
+              res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, actionBuffer))}\n\n`);
+            }
+            actionBuffer = '';
+            inAction = false;
+          } else if (actionBuffer.length > 600) {
+            res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, actionBuffer))}\n\n`);
+            actionBuffer = '';
+            inAction = false;
+          }
+          continue;
+        }
+        res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, char))}\n\n`);
+      }
+    }
+
+    if (actionBuffer && !/^\[ACTION(\s+|:)/i.test(actionBuffer)) {
+      res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, actionBuffer))}\n\n`);
+    }
+
+    res.write(
+      `data: ${JSON.stringify({
+        ...buildOpenAIChunk(streamId, ''),
+        choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      })}\n\n`,
+    );
+    res.write('data: [DONE]\n\n');
+    res.end();
+
+    await runActions(extractActions(fullText));
+    console.log(`[chat] completed in ${Date.now() - start}ms`);
+  } catch (error) {
+    console.error(`[chat] ${error.message}`);
+    if (!res.headersSent) {
+      return res.status(500).json({ error: { message: error.message } });
+    }
+    res.write('data: [DONE]\n\n');
+    res.end();
+  }
 });
+
+app.post('/conversation/finalize', finalizeConversation);
+app.post('/save-memory', finalizeConversation);
+
+app.use((_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+if (!isVercelRuntime) {
+  app.listen(config.port, () => {
+    console.log(`[server] listening on ${config.port}`);
+    console.log(`[server] llmProvider=${config.llmProvider} model=${config.llmModel}`);
+    console.log(`[server] brainDir=${config.brainDir}`);
+  });
+}
+
+module.exports = app;

@@ -1,45 +1,30 @@
-# Julia Voice — Real-Time Calling Architecture
+# Architecture
 
-## Overview
-Real-time voice conversations with Julia via a web app on Drewe's phone.
+For full post-launch maintenance details and design rationale, see:
+- `/Users/macminihome/dev_projects/call-julia/docs/AGENT_OPERATIONS_GUIDE.md`
 
-## Architecture: Two Phases
+## Components
 
-### Phase 1 — Quick Win (Today)
-**ElevenLabs Conversational AI Agent + Web Widget**
+- **Frontend (`app/`)**: React + `@elevenlabs/react` call UI.
+- **Backend (`server/`)**: Express API for signed URLs, custom LLM responses, action execution, and call finalization.
+- **Brain context (`brain/`)**: `soul.md`, `claude.md`, `memories.md`, `user.md`, plus rolling memory files in `brain/memory/`.
 
-- Create an ElevenLabs Agent via their API
-- Voice: Jessica (cgSgspJ2msm6clMCkdW9)
-- LLM: Claude Sonnet 4 (built-in, no custom server needed)
-- System prompt: Julia's personality from SOUL.md + key context
-- Deploy: Simple React app → Vercel. Drewe opens URL, taps "Call Julia"
-- Latency: Low — ElevenLabs handles all audio streaming via WebSocket
-- Limitation: No access to Julia's tools, memory files, or Supabase. It's Julia's personality but without her "brain."
+## Request Flow
 
-### Phase 2 — Full Brain (Later)
-**Custom LLM Server → OpenClaw Bridge**
+1. Frontend calls `GET /signed-url?agent_id=...`.
+2. Frontend starts ElevenLabs session with the returned signed URL.
+3. ElevenLabs calls backend `POST /v1/chat/completions` (custom LLM endpoint).
+4. Backend injects brain context and routes to configured LLM provider:
+   - `openai-compatible` (Claude Max proxy or any OpenAI-compatible endpoint), or
+   - `anthropic` (direct Anthropic API).
+5. Backend strips action tags from spoken stream and executes actions (Telegram/iMessage).
+6. On end/disconnect, frontend sends transcript to `POST /conversation/finalize`.
+7. Backend summarizes the call, sends summary to Telegram, and appends memory to `brain/memory/YYYY-MM-DD.md`.
 
-- FastAPI server on Mac Mini exposing OpenAI-compatible `/v1/chat/completions`
-- ElevenLabs Agent points to this custom endpoint
-- Server injects Julia's memory/context and routes to Claude via Anthropic API
-- Exposed via Tailscale Funnel or ngrok for public URL
-- Full tool access: memory, Supabase, cron, etc.
-- This is "real Julia" on the phone
+## Key Endpoints
 
-## Tech Stack
-- `@elevenlabs/react` — React SDK with `useConversation` hook
-- ElevenLabs Conversational AI API — agent creation + management
-- Vite + React + TypeScript — web app
-- Vercel — hosting
-- Tailscale Funnel (Phase 2) — expose Mac Mini endpoint
-
-## ElevenLabs Agent Config
-- Voice: Jessica (cgSgspJ2msm6clMCkdW9)
-- Model: Claude Sonnet 4 (Phase 1) / Custom LLM (Phase 2)
-- System prompt: Julia's SOUL.md + USER.md context
-- First message: "Hey Drewe. What's on your mind?"
-- Language: English
-
-## Cost (Starter Plan)
-- 30 min/month of Conversational AI included on Starter ($5/mo)
-- Additional: ~$0.08/min for voice + LLM costs
+- `GET /health`
+- `GET /signed-url`
+- `POST /v1/chat/completions`
+- `POST /conversation/finalize`
+- `POST /save-memory` (legacy alias of finalize)

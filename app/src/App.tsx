@@ -1,72 +1,163 @@
 import { useConversation } from '@elevenlabs/react';
-import { useCallback, useState, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
 
-const AGENT_ID = 'agent_5201khky212aetd8vjfd7rq473hb';
+type TranscriptMessage = {
+  role: 'you' | 'julia';
+  text: string;
+};
+
+const AGENT_ID = import.meta.env.VITE_ELEVENLABS_AGENT_ID || '';
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
+
+function apiUrl(endpoint: string): string {
+  const normalized = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
+  return API_BASE_URL ? `${API_BASE_URL}${normalized}` : normalized;
+}
+
+function newCallId(): string {
+  if ('randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `call_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
 
 function App() {
-  const [status, setStatus] = useState<string>('idle');
-  const [messages, setMessages] = useState<Array<{ role: string; text: string }>>([]);
+  const [status, setStatus] = useState<'idle' | 'connecting' | 'connected' | 'error'>('idle');
+  const [messages, setMessages] = useState<TranscriptMessage[]>([]);
+  const [callId, setCallId] = useState<string | null>(null);
+  const [uiError, setUiError] = useState<string>('');
+
+  const callIdRef = useRef<string | null>(null);
+  const messagesRef = useRef<TranscriptMessage[]>([]);
+  const finalizedRef = useRef<Set<string>>(new Set());
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
+    callIdRef.current = callId;
+  }, [callId]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const finalizeConversation = useCallback(async (id: string | null, transcript: TranscriptMessage[]) => {
+    if (!id || finalizedRef.current.has(id)) {
+      return;
+    }
+    finalizedRef.current.add(id);
+
+    if (transcript.length < 2) {
+      return;
+    }
+
+    try {
+      const response = await fetch(apiUrl('/conversation/finalize'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callId: id,
+          transcript,
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error || `Finalize failed with ${response.status}`);
+      }
+    } catch (error) {
+      console.error('[Julia] Failed to finalize conversation:', error);
+      setUiError(error instanceof Error ? error.message : 'Could not finalize conversation');
+    }
+  }, []);
+
   const conversation = useConversation({
     onConnect: () => {
-      console.log('[Julia] Connected');
       setStatus('connected');
+      setUiError('');
     },
     onDisconnect: () => {
-      console.log('[Julia] Disconnected');
       setStatus('idle');
+      void finalizeConversation(callIdRef.current, messagesRef.current);
+      setCallId(null);
     },
     onError: (error: unknown) => {
       console.error('[Julia] Conversation error:', error);
       setStatus('error');
+      setUiError(error instanceof Error ? error.message : 'Conversation error');
     },
     onMessage: (message: { source: string; message: string }) => {
-      console.log('[Julia] Message:', message.source, message.message);
-      setMessages((prev) => [
-        ...prev,
-        { role: message.source === 'user' ? 'you' : 'julia', text: message.message },
-      ]);
+      if (!message.message) {
+        return;
+      }
+      const role: 'you' | 'julia' = message.source === 'user' ? 'you' : 'julia';
+      setMessages((prev) => [...prev, { role, text: message.message }]);
     },
   });
 
   const startConversation = useCallback(async () => {
+    if (!AGENT_ID) {
+      setStatus('error');
+      setUiError('VITE_ELEVENLABS_AGENT_ID is not configured.');
+      return;
+    }
+
     try {
+      const id = newCallId();
       setStatus('connecting');
       setMessages([]);
+      setCallId(id);
+      setUiError('');
 
-      // Get signed URL from our server (proxies to ElevenLabs with API key)
-      // This enables proper WebRTC mode with a conversationToken
-      const SERVER_URL = 'https://drewes-mac-mini.tail2e734a.ts.net';
-      console.log('[Julia] Getting signed URL from server...');
-      const signedRes = await fetch(`${SERVER_URL}/signed-url?agent_id=${AGENT_ID}`);
-      if (!signedRes.ok) throw new Error('Failed to get signed URL: ' + signedRes.status);
-      const { signed_url } = await signedRes.json();
-      console.log('[Julia] Got signed URL, starting WebRTC session...');
-      await conversation.startSession({ signedUrl: signed_url });
+      const signedRes = await fetch(
+        `${apiUrl('/signed-url')}?agent_id=${encodeURIComponent(AGENT_ID)}&call_id=${encodeURIComponent(id)}`,
+      );
+      if (!signedRes.ok) {
+        const payload = await signedRes.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to get signed URL (${signedRes.status})`);
+      }
+
+      const payload = await signedRes.json();
+      const signedUrl = payload.signed_url as string | undefined;
+      if (!signedUrl) {
+        throw new Error('Signed URL is missing from backend response.');
+      }
+
+      await conversation.startSession({ signedUrl });
     } catch (error) {
-      console.error('[Julia] Failed to start:', error);
-      setMessages([{ role: 'julia', text: `⚠️ Could not connect: ${error instanceof Error ? error.message : 'Unknown error'}` }]);
+      console.error('[Julia] Failed to start conversation:', error);
       setStatus('error');
+      setUiError(error instanceof Error ? error.message : 'Unable to start call');
     }
   }, [conversation]);
 
   const endConversation = useCallback(async () => {
-    await conversation.endSession();
-    setStatus('idle');
-  }, [conversation]);
+    const activeCallId = callIdRef.current;
+    try {
+      await conversation.endSession();
+    } catch (error) {
+      console.error('[Julia] Failed to end session cleanly:', error);
+    } finally {
+      await finalizeConversation(activeCallId, messagesRef.current);
+      setStatus('idle');
+      setCallId(null);
+    }
+  }, [conversation, finalizeConversation]);
 
   const isActive = status === 'connected';
+  const statusText =
+    status === 'idle'
+      ? 'Ready to talk'
+      : status === 'connecting'
+        ? 'Connecting...'
+        : status === 'connected'
+          ? conversation.isSpeaking
+            ? 'Julia is speaking...'
+            : 'Listening...'
+          : 'Connection error';
 
   return (
     <div className="app">
-      {/* Decorative background elements */}
       <div className="bg-orb orb-1" />
       <div className="bg-orb orb-2" />
       <div className="bg-orb orb-3" />
@@ -80,35 +171,33 @@ function App() {
             </div>
           </div>
           <h1>Julia</h1>
-          <p className="subtitle">Your AI co-pilot</p>
+          <p className="subtitle">Voice memory + action assistant</p>
         </div>
 
         <div className="status-indicator">
           <div className={`dot ${isActive ? 'active' : status === 'connecting' ? 'connecting' : ''}`} />
-          <span>
-            {status === 'idle' && 'Ready to talk'}
-            {status === 'connecting' && 'Connecting...'}
-            {status === 'connected' && (conversation.isSpeaking ? 'Julia is speaking...' : 'Listening...')}
-            {status === 'error' && 'Connection error — check mic permissions & try again'}
-          </span>
+          <span>{statusText}</span>
         </div>
 
         <button
           className={`call-button ${isActive ? 'end' : 'start'}`}
           onClick={isActive ? endConversation : startConversation}
-          disabled={status === 'connecting'}
+          disabled={status === 'connecting' || !AGENT_ID}
         >
-          {isActive ? '✕  End Call' : '📞  Call Julia'}
+          {isActive ? 'End Call' : 'Call Julia'}
         </button>
+
+        {uiError && <p className="error-text">{uiError}</p>}
+        {!AGENT_ID && <p className="error-text">Set `VITE_ELEVENLABS_AGENT_ID` to enable calling.</p>}
 
         <div className="transcript">
           <h3>Transcript</h3>
           <div className="messages">
             {messages.length === 0 ? (
-              <div className="empty-transcript">Transcript will appear here...</div>
+              <div className="empty-transcript">Transcript will appear here during the call...</div>
             ) : (
-              messages.map((msg, i) => (
-                <div key={i} className={`message ${msg.role}`}>
+              messages.map((msg, index) => (
+                <div key={`${msg.role}-${index}`} className={`message ${msg.role}`}>
                   <span className="role">{msg.role === 'julia' ? 'Julia' : 'You'}</span>
                   <span className="text">{msg.text}</span>
                 </div>

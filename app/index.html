@@ -1,129 +1,15 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="Julia">
-  <title>Julia — Your AI Co-pilot</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      min-height: 100vh;
-      min-height: 100dvh;
-      background: linear-gradient(135deg, #f0f4f8 0%, #e8eef5 50%, #f5f0fa 100%);
-      color: #1a1a2e;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-      position: relative;
-    }
-
-    /* Background orbs */
-    .bg-orb {
-      position: absolute;
-      border-radius: 50%;
-      filter: blur(80px);
-      opacity: 0.3;
-      pointer-events: none;
-    }
-    .orb-1 { width: 300px; height: 300px; background: #7c6fea; top: -50px; right: -50px; }
-    .orb-2 { width: 250px; height: 250px; background: #6feaaf; bottom: -30px; left: -30px; }
-    .orb-3 { width: 200px; height: 200px; background: #ea6f9a; top: 40%; left: 60%; }
-
-    .container {
-      text-align: center;
-      z-index: 1;
-      padding: 2rem;
-    }
-
-    .avatar-ring {
-      width: 120px;
-      height: 120px;
-      border-radius: 50%;
-      background: linear-gradient(135deg, #7c6fea, #6feaaf);
-      padding: 4px;
-      margin: 0 auto 1rem;
-      animation: pulse 3s ease-in-out infinite;
-    }
-
-    .avatar {
-      width: 100%;
-      height: 100%;
-      border-radius: 50%;
-      background: linear-gradient(135deg, #8b7ff5, #9b8fff);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 2.5rem;
-      font-weight: 700;
-      color: white;
-    }
-
-    @keyframes pulse {
-      0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(124,111,234,0.2); }
-      50% { transform: scale(1.03); box-shadow: 0 0 20px 10px rgba(124,111,234,0.1); }
-    }
-
-    h1 {
-      font-size: 1.8rem;
-      font-weight: 700;
-      margin-bottom: 0.25rem;
-    }
-
-    .subtitle {
-      color: #666;
-      font-size: 0.95rem;
-      margin-bottom: 2rem;
-    }
-
-    .info {
-      color: #888;
-      font-size: 0.8rem;
-      margin-top: 1.5rem;
-      max-width: 300px;
-      line-height: 1.4;
-    }
-
-    /* Override the widget positioning to be centered instead of bottom-right */
-    elevenlabs-convai {
-      position: relative !important;
-      bottom: auto !important;
-      right: auto !important;
-    }
-  </style>
-</head>
-<body>
-  <div class="bg-orb orb-1"></div>
-  <div class="bg-orb orb-2"></div>
-  <div class="bg-orb orb-3"></div>
-
-  <div class="container">
-    <div class="avatar-ring">
-      <div class="avatar">J</div>
-    </div>
-    <h1>Julia</h1>
-    <p class="subtitle">Your AI co-pilot</p>
-
-    <elevenlabs-convai 
-      agent-id="agent_5201khky212aetd8vjfd7rq473hb"
-      variant="expanded"
-      avatar-orb-color-1="#7c6fea"
-      avatar-orb-color-2="#6feaaf"
-      action-text="Talk to Julia"
-      start-call-text="Call Julia"
-      end-call-text="End Call"
-      listening-text="Listening..."
-      speaking-text="Julia is speaking..."
-    ></elevenlabs-convai>
-    <script src="https://unpkg.com/@elevenlabs/convai-widget-embed" async type="text/javascript"></script>
-
-    <p class="info">Conversations are summarized and sent to Julia's memory. Actions you request will be forwarded for follow-up.</p>
-  </div>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Julia" />
+    <title>Julia — Voice Copilot</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
 </html>
