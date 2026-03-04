@@ -85,6 +85,7 @@ const config = {
   actionTelegramPrefix: (process.env.ACTION_TELEGRAM_PREFIX || "Drewe and I just talked about this so let's make sure that it happens:")
     .trim(),
   maxActionsPerResponse: Math.max(1, Number(process.env.MAX_ACTIONS_PER_RESPONSE || 1)),
+  actionDedupWindowSec: Math.max(0, Number(process.env.ACTION_DEDUP_WINDOW_SEC || 180)),
   timezone: process.env.TIMEZONE || 'America/Vancouver',
   assistantName: process.env.ASSISTANT_NAME || 'Julia',
 };
@@ -93,6 +94,8 @@ const contextCache = {
   value: '',
   expiresAt: 0,
 };
+
+const recentActionTimestamps = new Map();
 
 if (config.llmProvider === 'anthropic' && !config.anthropicApiKey) {
   console.warn('[WARN] LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is missing.');
@@ -157,6 +160,67 @@ function toSingleString(content) {
   return '';
 }
 
+function collectEmotionHints(value, hints = [], parentKey = '') {
+  if (hints.length >= 8 || value === null || value === undefined) {
+    return hints;
+  }
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectEmotionHints(item, hints, parentKey);
+      if (hints.length >= 8) {
+        break;
+      }
+    }
+    return hints;
+  }
+
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      const lowered = key.toLowerCase();
+      const fullKey = parentKey ? `${parentKey}.${key}` : key;
+      const isEmotionKey =
+        lowered.includes('emotion') ||
+        lowered.includes('mood') ||
+        lowered.includes('sentiment') ||
+        lowered.includes('affect') ||
+        lowered.includes('arousal') ||
+        lowered.includes('valence') ||
+        lowered.includes('tone') ||
+        lowered.includes('prosody');
+
+      if (isEmotionKey && (typeof child === 'string' || typeof child === 'number' || typeof child === 'boolean')) {
+        const valueText = String(child).trim();
+        if (valueText) {
+          hints.push(`${fullKey}=${valueText.slice(0, 80)}`);
+          if (hints.length >= 8) {
+            return hints;
+          }
+        }
+      }
+
+      collectEmotionHints(child, hints, fullKey);
+      if (hints.length >= 8) {
+        return hints;
+      }
+    }
+  }
+
+  return hints;
+}
+
+function injectEmotionHints(message, content) {
+  if (!message || message.role !== 'user') {
+    return content;
+  }
+  const hints = collectEmotionHints(message.content || message);
+  if (!hints.length) {
+    return content;
+  }
+  const joined = hints.join('; ');
+  return `${content}\n\n[Voice emotion metadata: ${joined}]`.trim();
+}
+
 function normalizeMessages(messages) {
   const normalized = [];
   for (const message of messages || []) {
@@ -167,7 +231,7 @@ function normalizeMessages(messages) {
       continue;
     }
     const role = message.role === 'assistant' ? 'assistant' : 'user';
-    const content = toSingleString(message.content).trim();
+    const content = injectEmotionHints(message, toSingleString(message.content).trim());
     if (!content) {
       continue;
     }
@@ -337,6 +401,7 @@ Voice style rules:
 - Speak naturally; short answers by default (2-5 sentences).
 - No markdown, no XML, no code blocks.
 - Be direct, warm, and practical.
+- Pay close attention to emotional signals from wording and voice metadata.
 
 Action protocol:
 - If the user asks for a concrete task, include exactly ONE action tag at the very end:
@@ -344,6 +409,12 @@ Action protocol:
 - Use concise actionable phrasing in message.
 - Only include an action tag when an action is actually requested.
 - Never repeat the same action tag in one response.
+
+Emotion handling:
+- Infer the user's likely mood each turn.
+- Briefly acknowledge emotional state before giving advice or next steps.
+- Adapt your tone intentionally (supportive when stressed, focused when excited, grounding when anxious).
+- Do not amplify panic, anger, or despair; redirect toward stable next actions.
 
 Current local time (${config.timezone}): ${new Date().toLocaleString('en-US', { timeZone: config.timezone })}
 
@@ -653,6 +724,35 @@ function dedupeAndLimitActions(actions) {
   return result;
 }
 
+function filterActionsByCooldown(actions) {
+  if (!config.actionDedupWindowSec) {
+    return actions;
+  }
+  const now = Date.now();
+  const ttlMs = config.actionDedupWindowSec * 1000;
+
+  for (const [key, timestamp] of recentActionTimestamps.entries()) {
+    if (now - timestamp > ttlMs) {
+      recentActionTimestamps.delete(key);
+    }
+  }
+
+  const output = [];
+  for (const action of actions || []) {
+    const key = normalizeActionForKey(action);
+    if (!key) {
+      continue;
+    }
+    const previousTs = recentActionTimestamps.get(key);
+    if (previousTs && now - previousTs <= ttlMs) {
+      continue;
+    }
+    recentActionTimestamps.set(key, now);
+    output.push(action);
+  }
+  return output;
+}
+
 function sendTelegram(text) {
   if (!config.telegramBotToken || !config.telegramChatId) {
     return Promise.resolve(false);
@@ -701,9 +801,10 @@ function sendIMessage(text) {
 }
 
 async function runActions(actions) {
-  const actionsToRun = dedupeAndLimitActions(actions);
+  const deduped = dedupeAndLimitActions(actions);
+  const actionsToRun = filterActionsByCooldown(deduped);
   if (actionsToRun.length < (actions || []).length) {
-    console.log(`[Action] Deduped/limited actions ${actions.length} -> ${actionsToRun.length}`);
+    console.log(`[Action] Deduped/limited/cooled actions ${(actions || []).length} -> ${actionsToRun.length}`);
   }
 
   for (const action of actionsToRun) {
@@ -793,8 +894,15 @@ Required format:
 1) One short paragraph on the core discussion.
 2) Bullet list of commitments or action items.
 3) Bullet list of any new preferences or personal context.
+4) Emotional signals and mood:
+- Primary mood(s) observed
+- Evidence from wording/tone cues
+- Confidence level (high/medium/low)
+5) Julia response strategy:
+- How Julia adapted tone in this call (or should adapt next time)
 
 If there are no commitments, write "- None." under action items.
+If emotional signal is weak, say "Not enough signal."
 
 Transcript:
 ${transcriptText}`;
@@ -850,6 +958,7 @@ app.get('/health', (_req, res) => {
     brainDir: config.brainDir,
     memoryDir: config.memoryDir,
     remoteBrainBaseUrl: config.brainRemoteBaseUrl || null,
+    actionDedupWindowSec: config.actionDedupWindowSec,
     timestamp: new Date().toISOString(),
   });
 });

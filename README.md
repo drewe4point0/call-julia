@@ -95,4 +95,7 @@ npm run dev
 - Memory append writes to `brain/memory/YYYY-MM-DD.md` when filesystem is writable.
 - On Vercel runtime with no `MEMORY_DIR` configured, memory writes default to `/tmp/call-julia-memory` (ephemeral).
 - Action tags are removed from spoken output before audio playback.
-- Action delivery is deduped and capped (default `MAX_ACTIONS_PER_RESPONSE=1`) to prevent repeated Telegram spam.
+- Action delivery is deduped, cooldown-limited, and capped to prevent repeated Telegram spam:
+  - `MAX_ACTIONS_PER_RESPONSE=1`
+  - `ACTION_DEDUP_WINDOW_SEC=180`
+- Call summaries now include observed mood/emotional signals and Julia response strategy.

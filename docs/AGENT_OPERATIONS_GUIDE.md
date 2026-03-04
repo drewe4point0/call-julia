@@ -30,6 +30,7 @@ Design choices and rationale:
 - Why: model/provider-independent and works in streaming mode.
 - Result: spoken output strips action tags before audio, backend executes tags out-of-band.
 - Guardrail: backend dedupes repeated tags and executes at most `MAX_ACTIONS_PER_RESPONSE` (default 1).
+- Guardrail: backend also applies cooldown dedupe (`ACTION_DEDUP_WINDOW_SEC`) across nearby turns.
 
 4. End-of-call memory is finalized by explicit frontend callback.
 - Why: old timer/global-state approaches were fragile and easy to miss.
@@ -196,6 +197,7 @@ Rules:
 1. Tags are hidden from spoken stream.
 2. Multiple tags are parsed, then deduped and capped before execution.
 3. Legacy format `[ACTION: ...]` maps to Telegram text.
+4. Repeated identical actions within cooldown window are skipped.
 
 Execution mapping:
 
@@ -257,6 +259,11 @@ Remote brain settings (useful on Vercel when `../brain` is unavailable):
 - `BRAIN_REMOTE_BASE_URL=https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>`
 - `BRAIN_REMOTE_MEMORY_PATH=memory`
 - `BRAIN_REMOTE_TIMEOUT_MS=6000`
+
+Action anti-spam settings:
+
+- `MAX_ACTIONS_PER_RESPONSE=1`
+- `ACTION_DEDUP_WINDOW_SEC=180`
 
 ## 10) Deployment Topologies
 
