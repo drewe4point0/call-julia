@@ -78,8 +78,20 @@ const config = {
     .map((name) => name.trim())
     .filter(Boolean),
   recentMemoryFiles: Number(process.env.RECENT_MEMORY_FILES || 2),
+  brainRemoteBaseUrl: (process.env.BRAIN_REMOTE_BASE_URL || '').trim().replace(/\/+$/, ''),
+  brainRemoteMemoryPath: (process.env.BRAIN_REMOTE_MEMORY_PATH || 'memory').trim().replace(/^\/+|\/+$/g, ''),
+  remoteFetchTimeoutMs: Number(process.env.BRAIN_REMOTE_TIMEOUT_MS || 6000),
+  contextCacheTtlMs: Number(process.env.CONTEXT_CACHE_TTL_MS || 60000),
+  actionTelegramPrefix: (process.env.ACTION_TELEGRAM_PREFIX || "Drewe and I just talked about this so let's make sure that it happens:")
+    .trim(),
+  maxActionsPerResponse: Math.max(1, Number(process.env.MAX_ACTIONS_PER_RESPONSE || 1)),
   timezone: process.env.TIMEZONE || 'America/Vancouver',
   assistantName: process.env.ASSISTANT_NAME || 'Julia',
+};
+
+const contextCache = {
+  value: '',
+  expiresAt: 0,
 };
 
 if (config.llmProvider === 'anthropic' && !config.anthropicApiKey) {
@@ -180,7 +192,36 @@ function tryRead(filePath) {
   }
 }
 
-function collectExistingContextFiles() {
+function dateStampForOffsetDays(offsetDays) {
+  return new Date(Date.now() - offsetDays * 86400000).toLocaleDateString('en-CA', { timeZone: config.timezone });
+}
+
+async function fetchRemoteText(relativePath) {
+  if (!config.brainRemoteBaseUrl) {
+    return null;
+  }
+  const cleanRelativePath = relativePath.replace(/^\/+/, '');
+  const url = `${config.brainRemoteBaseUrl}/${cleanRelativePath}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(1000, config.remoteFetchTimeoutMs));
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: { Accept: 'text/plain, text/markdown, */*' },
+    });
+    if (!response.ok) {
+      return null;
+    }
+    const body = await response.text();
+    return body && body.trim() ? body : null;
+  } catch (_err) {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function collectExistingContextFiles() {
   const entries = [];
   for (const fileName of config.contextFiles) {
     const normalized = fileName.toLowerCase();
@@ -192,11 +233,26 @@ function collectExistingContextFiles() {
         normalized.replace(/\.md$/, '.MD'),
       ]),
     );
+
+    let found = false;
     for (const variant of variants) {
       const fullPath = path.join(config.brainDir, variant);
       const content = tryRead(fullPath);
       if (content) {
         entries.push({ label: variant, content });
+        found = true;
+        break;
+      }
+    }
+
+    if (found) {
+      continue;
+    }
+
+    for (const variant of variants) {
+      const remoteContent = await fetchRemoteText(variant);
+      if (remoteContent) {
+        entries.push({ label: variant, content: remoteContent });
         break;
       }
     }
@@ -204,7 +260,8 @@ function collectExistingContextFiles() {
   return entries;
 }
 
-function collectRecentMemoryFiles() {
+async function collectRecentMemoryFiles() {
+  const entries = [];
   try {
     const files = fs
       .readdirSync(config.memoryDir)
@@ -212,19 +269,38 @@ function collectRecentMemoryFiles() {
       .sort()
       .reverse()
       .slice(0, Math.max(config.recentMemoryFiles, 0));
-    return files
-      .map((file) => {
-        const fullPath = path.join(config.memoryDir, file);
-        const content = tryRead(fullPath);
-        if (!content) {
-          return null;
-        }
-        return { label: path.join('memory', file), content };
-      })
-      .filter(Boolean);
+    for (const file of files) {
+      const fullPath = path.join(config.memoryDir, file);
+      const content = tryRead(fullPath);
+      if (!content) {
+        continue;
+      }
+      entries.push({ label: `memory/${file}`, content });
+    }
   } catch (_err) {
-    return [];
+    // Ignore local filesystem errors; remote context may still be available.
   }
+
+  const seenLabels = new Set(entries.map((item) => item.label));
+  if (entries.length < config.recentMemoryFiles && config.brainRemoteBaseUrl) {
+    for (let offset = 0; offset < config.recentMemoryFiles; offset += 1) {
+      const dateStamp = dateStampForOffsetDays(offset);
+      const fileName = `${dateStamp}.md`;
+      const label = `memory/${fileName}`;
+      if (seenLabels.has(label)) {
+        continue;
+      }
+      const relativePath = `${config.brainRemoteMemoryPath}/${fileName}`;
+      const remoteContent = await fetchRemoteText(relativePath);
+      if (!remoteContent) {
+        continue;
+      }
+      entries.push({ label, content: remoteContent });
+      seenLabels.add(label);
+    }
+  }
+
+  return entries.slice(0, Math.max(config.recentMemoryFiles, 0));
 }
 
 function clip(input, maxChars) {
@@ -237,18 +313,24 @@ function clip(input, maxChars) {
   return `${input.slice(0, maxChars)}\n...[truncated]`;
 }
 
-function loadAssistantContext() {
+async function loadAssistantContext() {
+  if (contextCache.expiresAt > Date.now() && contextCache.value) {
+    return contextCache.value;
+  }
   const sections = [];
-  for (const item of collectExistingContextFiles()) {
+  for (const item of await collectExistingContextFiles()) {
     sections.push(`=== ${item.label} ===\n${item.content}`);
   }
-  for (const item of collectRecentMemoryFiles()) {
+  for (const item of await collectRecentMemoryFiles()) {
     sections.push(`=== ${item.label} ===\n${item.content}`);
   }
-  return clip(sections.join('\n\n'), 30000);
+  const contextText = clip(sections.join('\n\n'), 30000);
+  contextCache.value = contextText;
+  contextCache.expiresAt = Date.now() + Math.max(1000, config.contextCacheTtlMs);
+  return contextText;
 }
 
-function buildSystemPrompt() {
+async function buildSystemPrompt() {
   return `You are ${config.assistantName}, in a live voice conversation.
 
 Voice style rules:
@@ -261,11 +343,12 @@ Action protocol:
 [ACTION type="telegram" message="..."]
 - Use concise actionable phrasing in message.
 - Only include an action tag when an action is actually requested.
+- Never repeat the same action tag in one response.
 
 Current local time (${config.timezone}): ${new Date().toLocaleString('en-US', { timeZone: config.timezone })}
 
 Long-term assistant context:
-${loadAssistantContext()}`;
+${await loadAssistantContext()}`;
 }
 
 async function* streamFromOpenAiCompatible(systemPrompt, messages) {
@@ -531,6 +614,45 @@ function extractActions(text) {
   return actions;
 }
 
+function formatActionMessage(message) {
+  const prefix = config.actionTelegramPrefix;
+  const body = (message || '').trim();
+  if (!prefix) {
+    return body;
+  }
+  if (!body) {
+    return prefix;
+  }
+  if (body.toLowerCase().startsWith(prefix.toLowerCase())) {
+    return body;
+  }
+  return `${prefix}\n${body}`;
+}
+
+function normalizeActionForKey(action) {
+  return `${(action.type || '').toLowerCase()}|${(action.channel || '').toLowerCase()}|${(action.message || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim()}`;
+}
+
+function dedupeAndLimitActions(actions) {
+  const seen = new Set();
+  const result = [];
+  for (const action of actions || []) {
+    const key = normalizeActionForKey(action);
+    if (!key || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(action);
+    if (result.length >= config.maxActionsPerResponse) {
+      break;
+    }
+  }
+  return result;
+}
+
 function sendTelegram(text) {
   if (!config.telegramBotToken || !config.telegramChatId) {
     return Promise.resolve(false);
@@ -579,15 +701,20 @@ function sendIMessage(text) {
 }
 
 async function runActions(actions) {
-  for (const action of actions) {
+  const actionsToRun = dedupeAndLimitActions(actions);
+  if (actionsToRun.length < (actions || []).length) {
+    console.log(`[Action] Deduped/limited actions ${actions.length} -> ${actionsToRun.length}`);
+  }
+
+  for (const action of actionsToRun) {
     try {
       if (action.type === 'telegram' || action.type === 'julia') {
         const defaultMessage = action.type === 'julia' ? 'Forwarded action from voice call.' : 'Action requested in voice call.';
-        await sendTelegram(action.message || defaultMessage);
+        await sendTelegram(formatActionMessage(action.message || defaultMessage));
         continue;
       }
       if (action.type === 'imessage') {
-        sendIMessage(action.message || 'Action requested in voice call.');
+        sendIMessage(formatActionMessage(action.message || 'Action requested in voice call.'));
         continue;
       }
       if (action.type === 'joke') {
@@ -601,7 +728,7 @@ async function runActions(actions) {
         continue;
       }
       if (action.message) {
-        await sendTelegram(action.message);
+        await sendTelegram(formatActionMessage(action.message));
       }
     } catch (error) {
       console.error(`[Action] Failed type=${action.type}: ${error.message}`);
@@ -722,6 +849,7 @@ app.get('/health', (_req, res) => {
     model: config.llmModel,
     brainDir: config.brainDir,
     memoryDir: config.memoryDir,
+    remoteBrainBaseUrl: config.brainRemoteBaseUrl || null,
     timestamp: new Date().toISOString(),
   });
 });
@@ -756,7 +884,7 @@ app.post('/v1/chat/completions', async (req, res) => {
   const stream = req.body?.stream !== false;
   try {
     const messages = normalizeMessages(req.body?.messages || []);
-    const systemPrompt = buildSystemPrompt();
+    const systemPrompt = await buildSystemPrompt();
 
     if (!stream) {
       const fullText = await completeModel(systemPrompt, messages);

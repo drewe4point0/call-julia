@@ -28,9 +28,13 @@ Primary maintainer handoff document:
    - `ELEVENLABS_AGENT_ID`
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
+   - `ACTION_TELEGRAM_PREFIX`
 3. Choose one LLM mode:
    - `LLM_PROVIDER=openai-compatible` with `LLM_BASE_URL` (`http://localhost:3456` for Claude Max proxy)
    - or `LLM_PROVIDER=anthropic` with `ANTHROPIC_API_KEY`
+4. For Vercel memory/persona context from another repo, set:
+   - `BRAIN_REMOTE_BASE_URL` (raw GitHub folder containing `soul.md`, `claude.md`, etc.)
+   - `BRAIN_REMOTE_MEMORY_PATH` (usually `memory`)
 
 ### Frontend
 
@@ -83,6 +87,7 @@ npm run dev
 - For Vercel backend, use:
   - `LLM_PROVIDER=anthropic` with `ANTHROPIC_API_KEY`, or
   - `LLM_PROVIDER=openai-compatible` with a publicly reachable `LLM_BASE_URL`.
+- If backend root is `server` on Vercel, local `../brain` may not exist at runtime; use `BRAIN_REMOTE_BASE_URL` to load soul/memory from GitHub raw files.
 
 ## Notes
 
@@ -90,3 +95,4 @@ npm run dev
 - Memory append writes to `brain/memory/YYYY-MM-DD.md` when filesystem is writable.
 - On Vercel runtime with no `MEMORY_DIR` configured, memory writes default to `/tmp/call-julia-memory` (ephemeral).
 - Action tags are removed from spoken output before audio playback.
+- Action delivery is deduped and capped (default `MAX_ACTIONS_PER_RESPONSE=1`) to prevent repeated Telegram spam.

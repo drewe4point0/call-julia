@@ -29,6 +29,7 @@ Design choices and rationale:
 3. Action tags are embedded in normal model text (`[ACTION ...]`).
 - Why: model/provider-independent and works in streaming mode.
 - Result: spoken output strips action tags before audio, backend executes tags out-of-band.
+- Guardrail: backend dedupes repeated tags and executes at most `MAX_ACTIONS_PER_RESPONSE` (default 1).
 
 4. End-of-call memory is finalized by explicit frontend callback.
 - Why: old timer/global-state approaches were fragile and easy to miss.
@@ -162,7 +163,8 @@ Context is assembled in this order:
 
 1. Static files from `CONTEXT_FILES` in `BRAIN_DIR` (first variant found per filename).
 2. Most recent memory files from `MEMORY_DIR` (`RECENT_MEMORY_FILES` count).
-3. Truncated to max 30k chars.
+3. If local files are missing, optional remote files from `BRAIN_REMOTE_BASE_URL` (GitHub raw or equivalent).
+4. Truncated to max 30k chars.
 
 Expected files:
 
@@ -176,6 +178,7 @@ Important:
 
 - Missing files do not crash runtime; they are skipped.
 - Context load is per request (dynamic), so file edits are picked up without restart.
+- A short cache (`CONTEXT_CACHE_TTL_MS`) reduces repeated remote fetch latency.
 
 ## 7) Action System
 
@@ -191,7 +194,7 @@ Supported action tags in assistant output:
 Rules:
 
 1. Tags are hidden from spoken stream.
-2. Multiple tags are parsed if model emits multiple.
+2. Multiple tags are parsed, then deduped and capped before execution.
 3. Legacy format `[ACTION: ...]` maps to Telegram text.
 
 Execution mapping:
@@ -200,6 +203,7 @@ Execution mapping:
 - `julia`: currently forwards to Telegram (same transport, different semantic intent).
 - `imessage`: uses `/opt/homebrew/bin/imsg` when enabled.
 - `joke`: model-generated joke, then routed to selected channel.
+- Telegram/iMessage action messages are prefixed by `ACTION_TELEGRAM_PREFIX`.
 
 ## 8) Frontend Call Lifecycle
 
@@ -247,6 +251,12 @@ Frontend required:
 
 - `VITE_API_BASE_URL=<backend origin>`
 - `VITE_ELEVENLABS_AGENT_ID=<agent id>`
+
+Remote brain settings (useful on Vercel when `../brain` is unavailable):
+
+- `BRAIN_REMOTE_BASE_URL=https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>`
+- `BRAIN_REMOTE_MEMORY_PATH=memory`
+- `BRAIN_REMOTE_TIMEOUT_MS=6000`
 
 ## 10) Deployment Topologies
 
