@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Julia">
+  <title>Julia — Your AI Co-pilot</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      min-height: 100dvh;
+      background: linear-gradient(135deg, #f0f4f8 0%, #e8eef5 50%, #f5f0fa 100%);
+      color: #1a1a2e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding-top: 15vh;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .bg-orb {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(80px);
+      opacity: 0.3;
+      pointer-events: none;
+    }
+    .orb-1 { width: 300px; height: 300px; background: #7c6fea; top: -50px; right: -50px; }
+    .orb-2 { width: 250px; height: 250px; background: #6feaaf; bottom: -30px; left: -30px; }
+    .orb-3 { width: 200px; height: 200px; background: #ea6f9a; top: 40%; left: 60%; }
+
+    .header {
+      text-align: center;
+      z-index: 1;
+      margin-bottom: 2rem;
+    }
+
+    .avatar-ring {
+      width: 100px;
+      height: 100px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #7c6fea, #6feaaf);
+      padding: 3px;
+      margin: 0 auto 0.75rem;
+      animation: pulse 3s ease-in-out infinite;
+    }
+
+    .avatar {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #8b7ff5, #9b8fff);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 2rem;
+      font-weight: 700;
+      color: white;
+    }
+
+    @keyframes pulse {
+      0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(124,111,234,0.2); }
+      50% { transform: scale(1.03); box-shadow: 0 0 20px 10px rgba(124,111,234,0.1); }
+    }
+
+    h1 {
+      font-size: 1.6rem;
+      font-weight: 700;
+      margin-bottom: 0.2rem;
+    }
+
+    .subtitle {
+      color: #666;
+      font-size: 0.9rem;
+    }
+
+    .info {
+      color: #999;
+      font-size: 0.75rem;
+      text-align: center;
+      max-width: 260px;
+      line-height: 1.4;
+      z-index: 1;
+      position: absolute;
+      bottom: 2rem;
+      left: 50%;
+      transform: translateX(-50%);
+    }
+
+    .widget-wrapper {
+      z-index: 10;
+      position: relative;
+      width: 350px;
+      height: 200px;
+      margin-top: 1rem;
+    }
+
+    /* Override the widget's fixed positioning to sit inside our wrapper */
+    elevenlabs-convai {
+      position: absolute !important;
+      bottom: 0 !important;
+      right: 0 !important;
+      left: 0 !important;
+      top: 0 !important;
+    }
+
+    .widget-hint {
+      color: #7c6fea;
+      font-size: 0.85rem;
+      font-weight: 500;
+      text-align: center;
+      z-index: 1;
+      animation: fadeHint 4s ease-in-out infinite;
+    }
+
+    .widget-hint .arrow {
+      display: inline-block;
+      animation: bounce 1.5s ease-in-out infinite;
+      font-size: 1.2rem;
+    }
+
+    @keyframes fadeHint {
+      0%, 100% { opacity: 0.7; }
+      50% { opacity: 1; }
+    }
+
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(5px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="bg-orb orb-1"></div>
+  <div class="bg-orb orb-2"></div>
+  <div class="bg-orb orb-3"></div>
+
+  <div class="header">
+    <div class="avatar-ring">
+      <div class="avatar">J</div>
+    </div>
+    <h1>Julia</h1>
+    <p class="subtitle">Your AI co-pilot</p>
+  </div>
+
+  <div class="widget-wrapper">
+  <elevenlabs-convai 
+    agent-id="agent_5201khky212aetd8vjfd7rq473hb"
+
+    avatar-orb-color-1="#7c6fea"
+    avatar-orb-color-2="#6feaaf"
+    action-text="Talk to Julia"
+    start-call-text="Start Call"
+    end-call-text="End Call"
+    listening-text="Listening..."
+    speaking-text="Julia is speaking..."
+  ></elevenlabs-convai>
+  <script src="https://unpkg.com/@elevenlabs/convai-widget-embed" async type="text/javascript"></script>
+  </div>
+
+
+</body>
+</html>
