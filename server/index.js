@@ -256,6 +256,31 @@ function tryRead(filePath) {
   }
 }
 
+function filenameVariants(fileName) {
+  const trimmed = (fileName || '').trim();
+  if (!trimmed) {
+    return [];
+  }
+  const parsed = path.parse(trimmed);
+  const base = parsed.name || trimmed.replace(/\.[^.]+$/, '');
+  const ext = parsed.ext || '';
+  const extLower = ext.toLowerCase();
+  const extUpper = ext.toUpperCase();
+
+  return Array.from(
+    new Set(
+      [
+        trimmed,
+        trimmed.toLowerCase(),
+        trimmed.toUpperCase(),
+        base ? `${base.toUpperCase()}${extLower}` : '',
+        base ? `${base.toUpperCase()}${extUpper}` : '',
+        base ? `${base.toLowerCase()}${extLower}` : '',
+      ].filter(Boolean),
+    ),
+  );
+}
+
 function dateStampForOffsetDays(offsetDays) {
   return new Date(Date.now() - offsetDays * 86400000).toLocaleDateString('en-CA', { timeZone: config.timezone });
 }
@@ -288,15 +313,7 @@ async function fetchRemoteText(relativePath) {
 async function collectExistingContextFiles() {
   const entries = [];
   for (const fileName of config.contextFiles) {
-    const normalized = fileName.toLowerCase();
-    const variants = Array.from(
-      new Set([
-        fileName,
-        normalized,
-        fileName.toUpperCase(),
-        normalized.replace(/\.md$/, '.MD'),
-      ]),
-    );
+    const variants = filenameVariants(fileName);
 
     let found = false;
     for (const variant of variants) {
