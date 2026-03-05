@@ -8,6 +8,7 @@ Voice web app + backend for talking to Julia via ElevenLabs, with:
 
 Primary maintainer handoff document:
 - `/Users/macminihome/dev_projects/call-julia/docs/AGENT_OPERATIONS_GUIDE.md`
+- `/Users/macminihome/dev_projects/call-julia/docs/CONFIG_DECISION_LOG.md`
 
 ## Architecture
 

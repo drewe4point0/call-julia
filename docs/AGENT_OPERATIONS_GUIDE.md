@@ -3,6 +3,9 @@
 This document is the post-launch handoff for AI agents maintaining `call-julia`.
 It explains not only **what** the system does, but **why it was stitched together this way** so future edits preserve behavior.
 
+Detailed key-by-key decision reference:
+- `/Users/macminihome/dev_projects/call-julia/docs/CONFIG_DECISION_LOG.md`
+
 ## 1) Product Intent
 
 The app provides a voice-call UX for talking to "Julia" while preserving long-term context and producing operational follow-through.
