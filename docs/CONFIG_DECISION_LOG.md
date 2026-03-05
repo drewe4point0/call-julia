@@ -67,6 +67,15 @@ Control:
 
 - `ACTION_TELEGRAM_PREFIX`
 
+Additional wording guardrail:
+
+1. Backend rewrites short/ambiguous reminder text into clearer phrasing, e.g.:
+- "Drewe would like to be reminded tomorrow at 9:00 AM to call the dentist."
+
+Why:
+
+1. Downstream Telegram receiver should be able to infer precise intent quickly.
+
 ### C) Emotion-aware behavior
 
 Decision:
@@ -97,6 +106,7 @@ Why:
 Effect:
 
 1. Summaries stay descriptive, not prescriptive.
+2. Plain-text sections with vertical spacing improve Telegram readability.
 
 ### E) Memory/context loading in serverless
 
@@ -310,6 +320,11 @@ Likely causes:
 
 1. `MAX_ACTIONS_PER_RESPONSE > 1`.
 2. `ACTION_DEDUP_WINDOW_SEC=0`.
+3. Reminder variants with small wording changes not normalized semantically.
+
+Mitigation now in code:
+
+1. Reminder intent normalization (e.g., "call dentist" + "call dentist tomorrow") is deduped in cooldown window.
 
 ### Slow first response
 

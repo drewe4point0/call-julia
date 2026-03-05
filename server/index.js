@@ -496,7 +496,9 @@ Voice style rules:
 Action protocol:
 - If the user asks for a concrete task, include exactly ONE action tag at the very end:
 [ACTION type="telegram" message="..."]
-- Use concise actionable phrasing in message.
+- Use clear actionable phrasing in message.
+- For reminders/tasks, include WHO + WHAT + WHEN (date/time if known).
+- Prefer messages like "Drewe would like to be reminded tomorrow at 9:00 AM to call the dentist."
 - Only include an action tag when an action is actually requested.
 - Never repeat the same action tag in one response.
 
@@ -790,11 +792,60 @@ function formatActionMessage(message) {
   return `${prefix}\n${body}`;
 }
 
+function normalizeReminderIntent(message) {
+  const raw = (message || '').toLowerCase();
+  const cleaned = raw
+    .replace(/\b(reminder|remind|would like to be reminded|please remind|set a reminder)\b/g, ' ')
+    .replace(/\b(drewe)\b/g, ' ')
+    .replace(/\b(today|tomorrow|tonight|this morning|this afternoon|this evening)\b/g, ' ')
+    .replace(/\b(at|on|by)\b/g, ' ')
+    .replace(/\b\d{1,2}(:\d{2})?\s*(am|pm)?\b/g, ' ')
+    .replace(/[^\w\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return cleaned || raw.replace(/\s+/g, ' ').trim();
+}
+
+function ensureDetailedActionMessage(action) {
+  const message = (action.message || '').trim();
+  if (!message) {
+    return 'Drewe would like a follow-up action from this call.';
+  }
+
+  const withoutReminderPrefix = message.replace(/^reminder:?\s*/i, '').trim();
+  const lower = withoutReminderPrefix.toLowerCase();
+  const hasDrewe = /\bdrewe\b/i.test(withoutReminderPrefix);
+  const hasReminderVerb = /\b(remind|reminder|be reminded)\b/i.test(withoutReminderPrefix);
+
+  let detailed = withoutReminderPrefix;
+  if (!hasDrewe || !hasReminderVerb) {
+    if (hasReminderVerb) {
+      detailed = `Drewe would like ${withoutReminderPrefix}`;
+    } else {
+      detailed = `Drewe would like to be reminded ${withoutReminderPrefix}`;
+    }
+  }
+
+  if (!/[.!?]$/.test(detailed)) {
+    detailed += '.';
+  }
+  return detailed;
+}
+
 function normalizeActionForKey(action) {
-  return `${(action.type || '').toLowerCase()}|${(action.channel || '').toLowerCase()}|${(action.message || '')
+  const type = (action.type || '').toLowerCase();
+  const channel = (action.channel || '').toLowerCase();
+  const message = (action.message || '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
-    .trim()}`;
+    .trim();
+
+  const isReminder = /\b(remind|reminder)\b/.test(message);
+  if ((type === 'telegram' || type === 'julia') && isReminder) {
+    return `${type}|reminder|${normalizeReminderIntent(message)}`;
+  }
+
+  return `${type}|${channel}|${message}`;
 }
 
 function dedupeAndLimitActions(actions) {
@@ -901,11 +952,11 @@ async function runActions(actions) {
     try {
       if (action.type === 'telegram' || action.type === 'julia') {
         const defaultMessage = action.type === 'julia' ? 'Forwarded action from voice call.' : 'Action requested in voice call.';
-        await sendTelegram(formatActionMessage(action.message || defaultMessage));
+        await sendTelegram(formatActionMessage(ensureDetailedActionMessage({ ...action, message: action.message || defaultMessage })));
         continue;
       }
       if (action.type === 'imessage') {
-        sendIMessage(formatActionMessage(action.message || 'Action requested in voice call.'));
+        sendIMessage(formatActionMessage(ensureDetailedActionMessage({ ...action, message: action.message || 'Action requested in voice call.' })));
         continue;
       }
       if (action.type === 'joke') {
@@ -919,7 +970,7 @@ async function runActions(actions) {
         continue;
       }
       if (action.message) {
-        await sendTelegram(formatActionMessage(action.message));
+        await sendTelegram(formatActionMessage(ensureDetailedActionMessage(action)));
       }
     } catch (error) {
       console.error(`[Action] Failed type=${action.type}: ${error.message}`);
@@ -980,17 +1031,32 @@ async function summarizeTranscript(transcript) {
   const transcriptText = transcript.map((entry) => `${entry.role === 'julia' ? config.assistantName : 'You'}: ${entry.text}`).join('\n');
   const summaryPrompt = `Create a concise but complete call summary for memory capture and follow-up.
 
-Required format:
-1) One short paragraph on the core discussion.
-2) Bullet list of commitments or action items.
-3) Bullet list of any new preferences or personal context.
-4) Emotional signals and mood:
-- Primary mood(s) observed
-- Evidence from wording/tone cues
-- Confidence level (high/medium/low)
+Output requirements:
+- Plain text only.
+- Do NOT use markdown symbols (no **, no #, no backticks).
+- Add blank lines between sections for readability.
+- Keep each bullet short.
 
-If there are no commitments, write "- None." under action items.
-If emotional signal is weak, say "Not enough signal."
+Use exactly this section structure:
+VOICE CALL SUMMARY
+
+Core Discussion:
+<2-4 concise lines>
+
+Action Items:
+- ...
+
+New Preferences / Personal Context:
+- ...
+
+Emotional Signals and Mood:
+- Primary mood: ...
+- Evidence: ...
+- Confidence: high|medium|low
+
+Rules:
+- If there are no action items, write: "- None."
+- If there is weak emotional signal, write: "- Primary mood: Not enough signal."
 
 Transcript:
 ${transcriptText}`;
@@ -1009,6 +1075,31 @@ ${transcriptText}`;
   }
 }
 
+function formatSummaryForTelegram(summaryText) {
+  const cleaned = (summaryText || '')
+    .replace(/\*\*/g, '')
+    .replace(/\r/g, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  const sectionHeaders = [
+    'VOICE CALL SUMMARY',
+    'Core Discussion:',
+    'Action Items:',
+    'New Preferences / Personal Context:',
+    'Emotional Signals and Mood:',
+  ];
+
+  let output = cleaned;
+  for (const header of sectionHeaders) {
+    const escaped = header.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    output = output.replace(new RegExp(`\\s*${escaped}`, 'g'), `\n\n${header}`);
+  }
+
+  output = output.replace(/^\s+/, '').replace(/\n{3,}/g, '\n\n').trim();
+  return output;
+}
+
 async function finalizeConversation(req, res) {
   const callId = (req.body?.callId || req.headers['x-call-id'] || '').toString().trim();
   const transcript = normalizeTranscript(req.body?.transcript || []);
@@ -1018,21 +1109,22 @@ async function finalizeConversation(req, res) {
   }
 
   const summary = await summarizeTranscript(transcript);
+  const formattedSummary = formatSummaryForTelegram(summary);
 
   let telegramSent = false;
   let telegramError = null;
   try {
-    telegramSent = await sendTelegram(`📞 Voice call summary${callId ? ` (${callId})` : ''}\n\n${summary}`);
+    telegramSent = await sendTelegram(`📞 Voice call summary${callId ? ` (${callId})` : ''}\n${formattedSummary}`);
   } catch (error) {
     telegramError = error.message;
   }
 
-  const memoryWrite = appendConversationMemory(summary, transcript, callId);
+  const memoryWrite = appendConversationMemory(formattedSummary, transcript, callId);
 
   return res.json({
     status: 'ok',
     callId: callId || null,
-    summary,
+    summary: formattedSummary,
     telegram: { sent: telegramSent, error: telegramError },
     memory: memoryWrite,
   });

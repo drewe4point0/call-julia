@@ -209,6 +209,7 @@ Execution mapping:
 - `imessage`: uses `/opt/homebrew/bin/imsg` when enabled.
 - `joke`: model-generated joke, then routed to selected channel.
 - Telegram/iMessage action messages are prefixed by `ACTION_TELEGRAM_PREFIX`.
+- Reminder-style actions are rewritten for clarity (who/what/when wording) before delivery.
 
 ## 8) Frontend Call Lifecycle
 
@@ -314,7 +315,8 @@ Action anti-spam settings:
 ### Change summary format
 
 1. Edit `summarizeTranscript()` prompt only.
-2. Avoid breaking downstream operators expecting plain text telegram output.
+2. Keep plain text + spacing; Telegram rendering does not reliably support markdown headings.
+3. Avoid breaking downstream operators expecting readable plain-text sections.
 
 ## 12) Operational Runbook
 
