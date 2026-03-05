@@ -996,7 +996,7 @@ function appendConversationMemory(summary, transcript, callId) {
   const fileName = `${getDateStamp()}.md`;
   const memoryFile = path.join(config.memoryDir, fileName);
   const lines = transcript
-    .map((entry) => `- **${entry.role === 'julia' ? config.assistantName : 'User'}**: ${entry.text}`)
+    .map((entry) => `- **${entry.role === 'julia' ? config.assistantName : 'Drewe'}**: ${entry.text}`)
     .join('\n');
   const callLabel = callId ? ` (${callId})` : '';
   const section = `\n\n### Voice Call${callLabel} — ${new Date().toLocaleString('en-US', {
@@ -1027,8 +1027,40 @@ function normalizeTranscript(transcript) {
     .filter(Boolean);
 }
 
+function detectExplicitOtherCallerName(transcript) {
+  const namePattern = /\b(?:this is|my name is|i am|i'm)\s+([A-Za-z][A-Za-z'-]{1,30})\b/gi;
+  for (const entry of transcript || []) {
+    if (!entry || entry.role === 'julia' || !entry.text) {
+      continue;
+    }
+    let match;
+    while ((match = namePattern.exec(entry.text)) !== null) {
+      const candidate = (match[1] || '').trim();
+      const lowered = candidate.toLowerCase();
+      if (lowered && lowered !== 'drewe' && lowered !== config.assistantName.toLowerCase()) {
+        return candidate;
+      }
+    }
+  }
+  return '';
+}
+
+function enforceCallerNaming(summaryText, transcript) {
+  const text = (summaryText || '').trim();
+  if (!text) {
+    return text;
+  }
+  if (detectExplicitOtherCallerName(transcript)) {
+    return text;
+  }
+  return text
+    .replace(/\b[Tt]he user\b/g, 'Drewe')
+    .replace(/\b[Uu]ser's\b/g, "Drewe's")
+    .replace(/\b[Uu]ser\b/g, 'Drewe');
+}
+
 async function summarizeTranscript(transcript) {
-  const transcriptText = transcript.map((entry) => `${entry.role === 'julia' ? config.assistantName : 'You'}: ${entry.text}`).join('\n');
+  const transcriptText = transcript.map((entry) => `${entry.role === 'julia' ? config.assistantName : 'Drewe'}: ${entry.text}`).join('\n');
   const summaryPrompt = `Create a concise but complete call summary for memory capture and follow-up.
 
 Output requirements:
@@ -1036,6 +1068,8 @@ Output requirements:
 - Do NOT use markdown symbols (no **, no #, no backticks).
 - Add blank lines between sections for readability.
 - Keep each bullet short.
+- Refer to the caller as "Drewe" by default, not "User."
+- Only use a different caller name if the transcript clearly states another person is speaking.
 
 Use exactly this section structure:
 VOICE CALL SUMMARY
@@ -1068,15 +1102,15 @@ ${transcriptText}`;
       'You produce concise, practical call summaries. No markdown headings.',
       [{ role: 'user', content: summaryPrompt }],
     );
-    return summary || fallback;
+    return enforceCallerNaming(summary || fallback, transcript) || fallback;
   } catch (error) {
     console.error(`[Summary] LLM summary failed: ${error.message}`);
-    return fallback;
+    return enforceCallerNaming(fallback, transcript);
   }
 }
 
-function formatSummaryForTelegram(summaryText) {
-  const cleaned = (summaryText || '')
+function formatSummaryForTelegram(summaryText, transcript) {
+  const cleaned = enforceCallerNaming(summaryText, transcript)
     .replace(/\*\*/g, '')
     .replace(/\r/g, '')
     .replace(/\n{3,}/g, '\n\n')
@@ -1109,7 +1143,7 @@ async function finalizeConversation(req, res) {
   }
 
   const summary = await summarizeTranscript(transcript);
-  const formattedSummary = formatSummaryForTelegram(summary);
+  const formattedSummary = formatSummaryForTelegram(summary, transcript);
 
   let telegramSent = false;
   let telegramError = null;
