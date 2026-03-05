@@ -81,6 +81,12 @@ const config = {
   brainRemoteBaseUrl: (process.env.BRAIN_REMOTE_BASE_URL || '').trim().replace(/\/+$/, ''),
   brainRemoteMemoryPath: (process.env.BRAIN_REMOTE_MEMORY_PATH || 'memory').trim().replace(/^\/+|\/+$/g, ''),
   remoteFetchTimeoutMs: Number(process.env.BRAIN_REMOTE_TIMEOUT_MS || 6000),
+  brainRemoteAuthToken: (process.env.BRAIN_REMOTE_AUTH_TOKEN || '').trim(),
+  githubBrainOwner: (process.env.GITHUB_BRAIN_OWNER || '').trim(),
+  githubBrainRepo: (process.env.GITHUB_BRAIN_REPO || '').trim(),
+  githubBrainBranch: (process.env.GITHUB_BRAIN_BRANCH || 'main').trim(),
+  githubBrainRootPath: (process.env.GITHUB_BRAIN_ROOT_PATH || '').trim().replace(/^\/+|\/+$/g, ''),
+  githubBrainToken: (process.env.GITHUB_BRAIN_TOKEN || '').trim(),
   contextCacheTtlMs: Number(process.env.CONTEXT_CACHE_TTL_MS || 60000),
   actionTelegramPrefix: (process.env.ACTION_TELEGRAM_PREFIX || "Drewe and I just talked about this so let's make sure that it happens:")
     .trim(),
@@ -286,17 +292,42 @@ function dateStampForOffsetDays(offsetDays) {
 }
 
 async function fetchRemoteText(relativePath) {
+  const cleanRelativePath = relativePath.replace(/^\/+/, '');
+
+  // Prefer GitHub API mode when configured; supports private repos via token.
+  if (config.githubBrainOwner && config.githubBrainRepo) {
+    const content = await fetchGithubContent(cleanRelativePath);
+    if (content) {
+      return content;
+    }
+  }
+
   if (!config.brainRemoteBaseUrl) {
     return null;
   }
-  const cleanRelativePath = relativePath.replace(/^\/+/, '');
+
   const url = `${config.brainRemoteBaseUrl}/${cleanRelativePath}`;
+  const headers = { Accept: 'text/plain, text/markdown, */*' };
+  if (config.brainRemoteAuthToken) {
+    headers.Authorization = `Bearer ${config.brainRemoteAuthToken}`;
+  }
+  return fetchTextWithTimeout(url, headers);
+}
+
+function joinGithubRootPath(relativePath) {
+  if (!config.githubBrainRootPath) {
+    return relativePath;
+  }
+  return `${config.githubBrainRootPath}/${relativePath}`.replace(/\/+/g, '/');
+}
+
+async function fetchTextWithTimeout(url, headers = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), Math.max(1000, config.remoteFetchTimeoutMs));
   try {
     const response = await fetch(url, {
       signal: controller.signal,
-      headers: { Accept: 'text/plain, text/markdown, */*' },
+      headers,
     });
     if (!response.ok) {
       return null;
@@ -308,6 +339,48 @@ async function fetchRemoteText(relativePath) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function decodeBase64Utf8(input) {
+  try {
+    return Buffer.from(input, 'base64').toString('utf8');
+  } catch (_err) {
+    return null;
+  }
+}
+
+async function fetchGithubContent(relativePath) {
+  const pathInRepo = joinGithubRootPath(relativePath);
+  const url = `https://api.github.com/repos/${encodeURIComponent(config.githubBrainOwner)}/${encodeURIComponent(
+    config.githubBrainRepo,
+  )}/contents/${pathInRepo}?ref=${encodeURIComponent(config.githubBrainBranch)}`;
+
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  if (config.githubBrainToken) {
+    headers.Authorization = `Bearer ${config.githubBrainToken}`;
+  }
+
+  const raw = await fetchTextWithTimeout(url, headers);
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    const payload = JSON.parse(raw);
+    if (payload && payload.type === 'file' && payload.encoding === 'base64' && typeof payload.content === 'string') {
+      const decoded = decodeBase64Utf8(payload.content.replace(/\n/g, ''));
+      return decoded && decoded.trim() ? decoded : null;
+    }
+    if (payload && typeof payload.download_url === 'string' && payload.download_url) {
+      return fetchTextWithTimeout(payload.download_url, {});
+    }
+  } catch (_err) {
+    return null;
+  }
+  return null;
 }
 
 async function collectExistingContextFiles() {
@@ -915,8 +988,6 @@ Required format:
 - Primary mood(s) observed
 - Evidence from wording/tone cues
 - Confidence level (high/medium/low)
-5) Julia response strategy:
-- How Julia adapted tone in this call (or should adapt next time)
 
 If there are no commitments, write "- None." under action items.
 If emotional signal is weak, say "Not enough signal."
@@ -975,6 +1046,10 @@ app.get('/health', (_req, res) => {
     brainDir: config.brainDir,
     memoryDir: config.memoryDir,
     remoteBrainBaseUrl: config.brainRemoteBaseUrl || null,
+    githubBrainMode: Boolean(config.githubBrainOwner && config.githubBrainRepo),
+    githubBrainRepo: config.githubBrainOwner && config.githubBrainRepo
+      ? `${config.githubBrainOwner}/${config.githubBrainRepo}@${config.githubBrainBranch}`
+      : null,
     actionDedupWindowSec: config.actionDedupWindowSec,
     timestamp: new Date().toISOString(),
   });

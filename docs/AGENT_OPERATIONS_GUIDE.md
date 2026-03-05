@@ -259,6 +259,8 @@ Remote brain settings (useful on Vercel when `../brain` is unavailable):
 - `BRAIN_REMOTE_BASE_URL=https://raw.githubusercontent.com/<owner>/<repo>/<branch>/<path>`
 - `BRAIN_REMOTE_MEMORY_PATH=memory`
 - `BRAIN_REMOTE_TIMEOUT_MS=6000`
+- For private GitHub repos, use API mode:
+  - `GITHUB_BRAIN_OWNER`, `GITHUB_BRAIN_REPO`, `GITHUB_BRAIN_BRANCH`, `GITHUB_BRAIN_ROOT_PATH`, `GITHUB_BRAIN_TOKEN`
 
 Action anti-spam settings:
 

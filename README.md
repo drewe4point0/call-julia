@@ -35,6 +35,8 @@ Primary maintainer handoff document:
 4. For Vercel memory/persona context from another repo, set:
    - `BRAIN_REMOTE_BASE_URL` (raw GitHub folder containing `soul.md`, `claude.md`, etc.)
    - `BRAIN_REMOTE_MEMORY_PATH` (usually `memory`)
+   - For private repos, prefer GitHub API mode:
+     - `GITHUB_BRAIN_OWNER`, `GITHUB_BRAIN_REPO`, `GITHUB_BRAIN_BRANCH`, `GITHUB_BRAIN_ROOT_PATH`, `GITHUB_BRAIN_TOKEN`
 
 ### Frontend
 
@@ -98,4 +100,4 @@ npm run dev
 - Action delivery is deduped, cooldown-limited, and capped to prevent repeated Telegram spam:
   - `MAX_ACTIONS_PER_RESPONSE=1`
   - `ACTION_DEDUP_WINDOW_SEC=180`
-- Call summaries now include observed mood/emotional signals and Julia response strategy.
+- Call summaries now include observed mood/emotional signals.
