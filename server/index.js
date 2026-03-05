@@ -291,6 +291,56 @@ function dateStampForOffsetDays(offsetDays) {
   return new Date(Date.now() - offsetDays * 86400000).toLocaleDateString('en-CA', { timeZone: config.timezone });
 }
 
+function getTemporalReference() {
+  const now = new Date();
+  const tomorrow = new Date(now.getTime() + 86400000);
+  const weekdayFmt = new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: config.timezone });
+  const dateFmt = new Intl.DateTimeFormat('en-US', {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: config.timezone,
+  });
+  const dateShortFmt = new Intl.DateTimeFormat('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric',
+    timeZone: config.timezone,
+  });
+  return {
+    timezone: config.timezone,
+    nowLocal: new Date().toLocaleString('en-US', { timeZone: config.timezone }),
+    todayWeekday: weekdayFmt.format(now),
+    tomorrowWeekday: weekdayFmt.format(tomorrow),
+    todayLabel: dateFmt.format(now),
+    tomorrowLabel: dateFmt.format(tomorrow),
+    todayDate: dateShortFmt.format(now),
+    tomorrowDate: dateShortFmt.format(tomorrow),
+  };
+}
+
+function enforceCalendarConsistency(text) {
+  const input = (text || '').trim();
+  if (!input) {
+    return input;
+  }
+  const { todayWeekday, tomorrowWeekday } = getTemporalReference();
+  const weekdayRegex = /\b(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday)\b/gi;
+
+  const lines = input.split('\n').map((line) => {
+    const lower = line.toLowerCase();
+    if (lower.includes('tomorrow')) {
+      return line.replace(weekdayRegex, tomorrowWeekday);
+    }
+    if (lower.includes('today')) {
+      return line.replace(weekdayRegex, todayWeekday);
+    }
+    return line;
+  });
+  return lines.join('\n');
+}
+
 async function fetchRemoteText(relativePath) {
   const cleanRelativePath = relativePath.replace(/^\/+/, '');
 
@@ -485,6 +535,7 @@ async function loadAssistantContext() {
 }
 
 async function buildSystemPrompt() {
+  const nowRef = getTemporalReference();
   return `You are ${config.assistantName}, in a live voice conversation.
 
 Voice style rules:
@@ -508,7 +559,15 @@ Emotion handling:
 - Adapt your tone intentionally (supportive when stressed, focused when excited, grounding when anxious).
 - Do not amplify panic, anger, or despair; redirect toward stable next actions.
 
-Current local time (${config.timezone}): ${new Date().toLocaleString('en-US', { timeZone: config.timezone })}
+Authoritative calendar context (${nowRef.timezone}):
+- Current local time: ${nowRef.nowLocal}
+- Today: ${nowRef.todayLabel}
+- Tomorrow: ${nowRef.tomorrowLabel}
+
+Calendar rules:
+- If you reference "today" or "tomorrow", keep weekday/date consistent with the calendar context above.
+- If the user gives a specific date, trust the user's date.
+- If timing is ambiguous, ask a short clarifying question instead of guessing a weekday.
 
 Long-term assistant context:
 ${await loadAssistantContext()}`;
@@ -826,6 +885,8 @@ function ensureDetailedActionMessage(action) {
     }
   }
 
+  detailed = enforceCalendarConsistency(detailed);
+
   if (!/[.!?]$/.test(detailed)) {
     detailed += '.';
   }
@@ -1060,8 +1121,14 @@ function enforceCallerNaming(summaryText, transcript) {
 }
 
 async function summarizeTranscript(transcript) {
+  const nowRef = getTemporalReference();
   const transcriptText = transcript.map((entry) => `${entry.role === 'julia' ? config.assistantName : 'Drewe'}: ${entry.text}`).join('\n');
   const summaryPrompt = `Create a concise but complete call summary for memory capture and follow-up.
+
+Authoritative calendar context (${nowRef.timezone}):
+- Current local time: ${nowRef.nowLocal}
+- Today: ${nowRef.todayLabel}
+- Tomorrow: ${nowRef.tomorrowLabel}
 
 Output requirements:
 - Plain text only.
@@ -1070,6 +1137,7 @@ Output requirements:
 - Keep each bullet short.
 - Refer to the caller as "Drewe" by default, not "User."
 - Only use a different caller name if the transcript clearly states another person is speaking.
+- Keep "today/tomorrow" weekday references consistent with the authoritative calendar context above.
 
 Use exactly this section structure:
 VOICE CALL SUMMARY
@@ -1102,15 +1170,15 @@ ${transcriptText}`;
       'You produce concise, practical call summaries. No markdown headings.',
       [{ role: 'user', content: summaryPrompt }],
     );
-    return enforceCallerNaming(summary || fallback, transcript) || fallback;
+    return enforceCallerNaming(enforceCalendarConsistency(summary || fallback), transcript) || fallback;
   } catch (error) {
     console.error(`[Summary] LLM summary failed: ${error.message}`);
-    return enforceCallerNaming(fallback, transcript);
+    return enforceCallerNaming(enforceCalendarConsistency(fallback), transcript);
   }
 }
 
 function formatSummaryForTelegram(summaryText, transcript) {
-  const cleaned = enforceCallerNaming(summaryText, transcript)
+  const cleaned = enforceCalendarConsistency(enforceCallerNaming(summaryText, transcript))
     .replace(/\*\*/g, '')
     .replace(/\r/g, '')
     .replace(/\n{3,}/g, '\n\n')
