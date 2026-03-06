@@ -547,11 +547,18 @@ Voice style rules:
 Action protocol:
 - If the user asks for a concrete task, include exactly ONE action tag at the very end:
 [ACTION type="telegram" message="..."]
-- Use clear actionable phrasing in message.
+[ACTION type="imessage" message="..."]
+[ACTION type="private" message="..."]
+- VERBATIM RULE: Forward the user's EXACT request in the message field. Do NOT rephrase, summarize, or interpret. Match the channel they specify (iMessage/text = imessage, Telegram = telegram).
 - For reminders/tasks, include WHO + WHAT + WHEN (date/time if known).
-- Prefer messages like "Drewe would like to be reminded tomorrow at 9:00 AM to call the dentist."
 - Only include an action tag when an action is actually requested.
 - Never repeat the same action tag in one response.
+
+Private sidebar (multi-person conversations):
+- When someone other than the user is present and you notice skepticism, discomfort, confusion, or something worth noting privately, use: [ACTION type="private" message="your observation"]
+- This sends a private Telegram message ONLY to the user — the other person will NOT hear it.
+- Use your judgment: only sidebar when genuinely useful. Don't overdo it.
+- Never say out loud what you're sending via sidebar.
 
 Emotion handling:
 - Infer the user's likely mood each turn.
@@ -1014,6 +1021,10 @@ async function runActions(actions) {
       if (action.type === 'telegram' || action.type === 'julia') {
         const defaultMessage = action.type === 'julia' ? 'Forwarded action from voice call.' : 'Action requested in voice call.';
         await sendTelegram(formatActionMessage(ensureDetailedActionMessage({ ...action, message: action.message || defaultMessage })));
+        continue;
+      }
+      if (action.type === 'private') {
+        await sendTelegram(`👀 *Private sidebar from Voice Julia:*\n\n${action.message || 'Observation from voice call.'}`);
         continue;
       }
       if (action.type === 'imessage') {
