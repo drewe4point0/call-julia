@@ -63,17 +63,17 @@ const config = {
   llmProvider: (process.env.LLM_PROVIDER || 'openai-compatible').toLowerCase(),
   llmBaseUrl: process.env.LLM_BASE_URL || 'http://localhost:3456',
   llmApiKey: process.env.LLM_API_KEY || '',
-  llmModel: process.env.LLM_MODEL || 'claude-sonnet-4-20250514',
+  llmModel: process.env.LLM_MODEL || 'claude-sonnet-latest',
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
   anthropicVersion: process.env.ANTHROPIC_VERSION || '2023-06-01',
-  llmMaxTokens: Number(process.env.LLM_MAX_TOKENS || 450),
+  llmMaxTokens: Number(process.env.LLM_MAX_TOKENS || 180),
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
   telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
   imessageTo: process.env.IMESSAGE_TO || '',
   enableIMessage: process.env.ENABLE_IMESSAGE === 'true',
   brainDir,
   memoryDir,
-  contextFiles: (process.env.CONTEXT_FILES || 'soul.md,claude.md,user.md,memories.md,memory.md,tools.md')
+  contextFiles: (process.env.CONTEXT_FILES || 'soul.md,claude.md,user.md,memories.md,memory.md')
     .split(',')
     .map((name) => name.trim())
     .filter(Boolean),
@@ -87,7 +87,7 @@ const config = {
   githubBrainBranch: (process.env.GITHUB_BRAIN_BRANCH || 'main').trim(),
   githubBrainRootPath: (process.env.GITHUB_BRAIN_ROOT_PATH || '').trim().replace(/^\/+|\/+$/g, ''),
   githubBrainToken: (process.env.GITHUB_BRAIN_TOKEN || '').trim(),
-  contextCacheTtlMs: Number(process.env.CONTEXT_CACHE_TTL_MS || 60000),
+  contextCacheTtlMs: Number(process.env.CONTEXT_CACHE_TTL_MS || 5000),
   actionTelegramPrefix: (process.env.ACTION_TELEGRAM_PREFIX || "Drewe and I just talked about this so let's make sure that it happens:")
     .trim(),
   maxActionsPerResponse: Math.max(1, Number(process.env.MAX_ACTIONS_PER_RESPONSE || 1)),
@@ -1315,12 +1315,37 @@ app.post('/v1/chat/completions', async (req, res) => {
     const streamId = `chatcmpl-${Date.now()}`;
     let fullText = '';
     let actionBuffer = '';
+    let speechBuffer = '';
     let inAction = false;
+
+    function shouldFlushSpeech(text) {
+      return text.length >= 32 || /[\n.!?]$/.test(text) || (/\s$/.test(text) && text.length >= 12);
+    }
+
+    function flushSpeech(force = false) {
+      if (!speechBuffer) {
+        return;
+      }
+      if (!force && !shouldFlushSpeech(speechBuffer)) {
+        return;
+      }
+      res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, speechBuffer))}\n\n`);
+      speechBuffer = '';
+    }
+
+    function appendSpeech(text) {
+      if (!text) {
+        return;
+      }
+      speechBuffer += text;
+      flushSpeech(false);
+    }
 
     for await (const chunk of streamModel(systemPrompt, messages)) {
       fullText += chunk;
       for (const char of chunk) {
         if (char === '[' && !inAction) {
+          flushSpeech(true);
           inAction = true;
           actionBuffer = '[';
           continue;
@@ -1329,24 +1354,25 @@ app.post('/v1/chat/completions', async (req, res) => {
           actionBuffer += char;
           if (char === ']') {
             if (!/^\[ACTION(\s+|:)/i.test(actionBuffer)) {
-              res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, actionBuffer))}\n\n`);
+              appendSpeech(actionBuffer);
             }
             actionBuffer = '';
             inAction = false;
           } else if (actionBuffer.length > 600) {
-            res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, actionBuffer))}\n\n`);
+            appendSpeech(actionBuffer);
             actionBuffer = '';
             inAction = false;
           }
           continue;
         }
-        res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, char))}\n\n`);
+        appendSpeech(char);
       }
     }
 
     if (actionBuffer && !/^\[ACTION(\s+|:)/i.test(actionBuffer)) {
-      res.write(`data: ${JSON.stringify(buildOpenAIChunk(streamId, actionBuffer))}\n\n`);
+      appendSpeech(actionBuffer);
     }
+    flushSpeech(true);
 
     res.write(
       `data: ${JSON.stringify({
