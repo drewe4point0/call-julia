@@ -10,8 +10,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@elevenlabs/client": "^0.15.0",
-    "@elevenlabs/react": "^0.14.1",
+    "@elevenlabs/client": "^1.15.2",
+    "@elevenlabs/react": "^1.10.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

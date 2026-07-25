@@ -1,4 +1,4 @@
-import { useConversation } from '@elevenlabs/react';
+import { useConversation, type DisconnectionDetails } from '@elevenlabs/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import './App.css';
 
@@ -31,6 +31,7 @@ function App() {
   const callIdRef = useRef<string | null>(null);
   const messagesRef = useRef<TranscriptMessage[]>([]);
   const finalizedRef = useRef<Set<string>>(new Set());
+  const intentionalEndRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -76,15 +77,21 @@ function App() {
       setStatus('connected');
       setUiError('');
     },
-    onDisconnect: () => {
-      setStatus('idle');
+    onDisconnect: (details: DisconnectionDetails) => {
+      const endedNormally = intentionalEndRef.current || details?.reason === 'user';
+      intentionalEndRef.current = false;
+      setStatus(endedNormally ? 'idle' : 'error');
+      if (!endedNormally) {
+        const detailMessage = details && 'message' in details ? details.message : details?.closeReason;
+        setUiError(detailMessage || 'The call disconnected unexpectedly. Tap Call Julia to reconnect.');
+      }
       void finalizeConversation(callIdRef.current, messagesRef.current);
       setCallId(null);
     },
-    onError: (error: unknown) => {
-      console.error('[Julia] Conversation error:', error);
+    onError: (error: unknown, context?: unknown) => {
+      console.error('[Julia] Conversation error:', error, context);
       setStatus('error');
-      setUiError(error instanceof Error ? error.message : 'Conversation error');
+      setUiError(error instanceof Error ? error.message : typeof error === 'string' ? error : 'Conversation error');
     },
     onMessage: (message: { source: string; message: string }) => {
       if (!message.message) {
@@ -104,26 +111,35 @@ function App() {
 
     try {
       const id = newCallId();
+      intentionalEndRef.current = false;
       setStatus('connecting');
       setMessages([]);
       setCallId(id);
       setUiError('');
 
-      const signedRes = await fetch(
-        `${apiUrl('/signed-url')}?agent_id=${encodeURIComponent(AGENT_ID)}&call_id=${encodeURIComponent(id)}`,
+      await navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+        stream.getTracks().forEach((track) => track.stop());
+      });
+
+      const tokenRes = await fetch(
+        `${apiUrl('/conversation-token')}?agent_id=${encodeURIComponent(AGENT_ID)}&call_id=${encodeURIComponent(id)}`,
       );
-      if (!signedRes.ok) {
-        const payload = await signedRes.json().catch(() => ({}));
-        throw new Error(payload.error || `Failed to get signed URL (${signedRes.status})`);
+      if (!tokenRes.ok) {
+        const payload = await tokenRes.json().catch(() => ({}));
+        throw new Error(payload.error || `Failed to prepare the call (${tokenRes.status})`);
       }
 
-      const payload = await signedRes.json();
-      const signedUrl = payload.signed_url as string | undefined;
-      if (!signedUrl) {
-        throw new Error('Signed URL is missing from backend response.');
+      const payload = await tokenRes.json();
+      const conversationToken = payload.token as string | undefined;
+      if (!conversationToken) {
+        throw new Error('Conversation token is missing from backend response.');
       }
 
-      await conversation.startSession({ signedUrl });
+      await conversation.startSession({
+        conversationToken,
+        connectionType: 'webrtc',
+        userId: 'drewe',
+      });
     } catch (error) {
       console.error('[Julia] Failed to start conversation:', error);
       setStatus('error');
@@ -133,6 +149,7 @@ function App() {
 
   const endConversation = useCallback(async () => {
     const activeCallId = callIdRef.current;
+    intentionalEndRef.current = true;
     try {
       await conversation.endSession();
     } catch (error) {

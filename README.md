@@ -9,12 +9,14 @@ Voice web app + backend for talking to Julia via ElevenLabs, with:
 Primary maintainer handoff document:
 - `/Users/macminihome/dev_projects/call-julia/docs/AGENT_OPERATIONS_GUIDE.md`
 - `/Users/macminihome/dev_projects/call-julia/docs/CONFIG_DECISION_LOG.md`
+- `/Users/macminihome/dev_projects/call-julia/docs/CURRENT_RUNTIME_AND_DEPLOYMENT.md` (canonical current-state runtime and env reference)
 
 ## Architecture
 
 - `app/`: Vite + React UI using `@elevenlabs/react`.
 - `server/`: Express backend providing:
-  - `GET /signed-url` for ElevenLabs signed conversation URLs
+  - `GET /conversation-token` for low-latency WebRTC sessions
+  - `GET /signed-url` for legacy ElevenLabs WebSocket sessions
   - `POST /v1/chat/completions` for ElevenLabs custom LLM endpoint
   - `POST /conversation/finalize` to summarize/save call memory
 - `brain/`: local assistant context files loaded into every LLM call.
@@ -53,7 +55,7 @@ In your ElevenLabs Conversational AI agent:
 1. Keep the same agent ID used in frontend env.
 2. Set custom LLM endpoint to:
    - `https://<your-backend-domain>/v1/chat/completions`
-3. Ensure the agent uses signed URL auth (frontend calls `/signed-url`).
+3. Ensure the agent supports token auth (frontend calls `/conversation-token` and starts WebRTC).
 
 ## 3) Local run
 

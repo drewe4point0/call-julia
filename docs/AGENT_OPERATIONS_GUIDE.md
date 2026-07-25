@@ -5,6 +5,7 @@ It explains not only **what** the system does, but **why it was stitched togethe
 
 Detailed key-by-key decision reference:
 - `/Users/macminihome/dev_projects/call-julia/docs/CONFIG_DECISION_LOG.md`
+- `/Users/macminihome/dev_projects/call-julia/docs/CURRENT_RUNTIME_AND_DEPLOYMENT.md` (authoritative runtime state and full env inventory)
 
 ## 1) Product Intent
 
@@ -217,8 +218,9 @@ Key logic in `app/src/App.tsx`:
 
 1. `startConversation()`:
 - creates `callId`,
-- fetches signed URL from backend,
-- starts ElevenLabs session.
+- verifies microphone permission,
+- fetches a WebRTC conversation token from backend,
+- starts an ElevenLabs WebRTC session.
 
 2. `onMessage()`:
 - appends transcript line-by-line (`you` or `julia`).
@@ -226,6 +228,12 @@ Key logic in `app/src/App.tsx`:
 3. `endConversation()` and `onDisconnect()`:
 - call `/conversation/finalize` with transcript and `callId`.
 - guarded by `finalizedRef` so each call finalizes once.
+- preserve unexpected disconnect details in the UI instead of masking them as a normal end.
+
+4. Model reliability:
+- live turns use `VOICE_LLM_MODEL`,
+- summaries use `SUMMARY_LLM_MODEL`,
+- Anthropic model 400/404 responses cascade through `ANTHROPIC_FALLBACK_MODELS`.
 
 Why this matters:
 
@@ -290,6 +298,15 @@ Action anti-spam settings:
 - Frontend on Vercel.
 - Backend on Render/Fly/Railway/Vercel or VM.
 - Ensure backend has persistent storage if daily memory files must persist.
+
+### Important current-state note
+
+- Production is intended to run with frontend on `talk-with-julia` and backend on `call-julia`.
+- A separate local process on port `3789` may also exist from older/local workspaces.
+- Always verify active runtime wiring using:
+  - frontend `VITE_API_BASE_URL`
+  - ElevenLabs Custom LLM base URL
+  - backend `/health` response
 
 ## 11) Editing Playbooks for Future AI Agents
 

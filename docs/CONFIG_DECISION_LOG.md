@@ -370,3 +370,56 @@ Before changing behavior defaults:
 3. Predict side effects on latency, duplication, and memory recall.
 4. Update this document and `AGENT_OPERATIONS_GUIDE.md`.
 5. Add a small runtime check in `/health` output if new mode is introduced.
+
+## 9) Additional Runtime-Critical Decisions (March 2026)
+
+### 9.1 Caller naming normalization in summaries
+
+Decision:
+
+1. Default summary speaker references to `Drewe` instead of `User`.
+2. Only allow alternate caller names when transcript explicitly states another speaker.
+
+Why:
+
+1. Summary consumers should receive direct, personal references, not generic labels.
+
+Effect:
+
+1. Telegram summaries and stored memory remain consistent with expected identity language.
+
+### 9.2 Calendar consistency enforcement
+
+Decision:
+
+1. Inject authoritative local calendar context (timezone, current local time, today, tomorrow) into prompts.
+2. Post-process summary/action text to correct weekday names when lines mention `today` or `tomorrow`.
+
+Why:
+
+1. Prevent day-of-week drift and scheduling confusion in reminders/summaries.
+
+Effect:
+
+1. More reliable date wording in action messages and summaries.
+2. Reduced risk of "Tuesday vs Wednesday" style errors.
+
+### 9.3 Dual-runtime clarity requirement
+
+Decision:
+
+1. Treat Vercel backend (`call-julia`) as production source of truth.
+2. Explicitly document that local port `3789` may still run an unrelated/legacy local process.
+
+Why:
+
+1. Operators and AI agents were misattributing behavior between local and deployed runtimes.
+
+Effect:
+
+1. Faster root-cause diagnosis.
+2. Lower chance of editing/redeploying the wrong service.
+
+Reference:
+
+- `/Users/macminihome/dev_projects/call-julia/docs/CURRENT_RUNTIME_AND_DEPLOYMENT.md`

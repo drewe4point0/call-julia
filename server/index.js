@@ -63,10 +63,17 @@ const config = {
   llmProvider: (process.env.LLM_PROVIDER || 'openai-compatible').toLowerCase(),
   llmBaseUrl: process.env.LLM_BASE_URL || 'http://localhost:3456',
   llmApiKey: process.env.LLM_API_KEY || '',
-  llmModel: process.env.LLM_MODEL || 'claude-sonnet-latest',
+  llmModel: process.env.LLM_MODEL || 'claude-sonnet-4-6',
+  voiceLlmModel: process.env.VOICE_LLM_MODEL || 'claude-haiku-4-5',
+  summaryLlmModel: process.env.SUMMARY_LLM_MODEL || 'claude-sonnet-4-6',
+  anthropicFallbackModels: (process.env.ANTHROPIC_FALLBACK_MODELS || 'claude-haiku-4-5,claude-sonnet-4-6')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean),
   anthropicApiKey: process.env.ANTHROPIC_API_KEY || '',
   anthropicVersion: process.env.ANTHROPIC_VERSION || '2023-06-01',
-  llmMaxTokens: Number(process.env.LLM_MAX_TOKENS || 180),
+  llmMaxTokens: Number(process.env.LLM_MAX_TOKENS || 220),
+  llmTimeoutMs: Number(process.env.LLM_TIMEOUT_MS || 20000),
   telegramBotToken: process.env.TELEGRAM_BOT_TOKEN || '',
   telegramChatId: process.env.TELEGRAM_CHAT_ID || '',
   imessageTo: process.env.IMESSAGE_TO || '',
@@ -87,7 +94,8 @@ const config = {
   githubBrainBranch: (process.env.GITHUB_BRAIN_BRANCH || 'main').trim(),
   githubBrainRootPath: (process.env.GITHUB_BRAIN_ROOT_PATH || '').trim().replace(/^\/+|\/+$/g, ''),
   githubBrainToken: (process.env.GITHUB_BRAIN_TOKEN || '').trim(),
-  contextCacheTtlMs: Number(process.env.CONTEXT_CACHE_TTL_MS || 5000),
+  contextCacheTtlMs: Number(process.env.CONTEXT_CACHE_TTL_MS || 60000),
+  contextMaxChars: Number(process.env.CONTEXT_MAX_CHARS || 14000),
   actionTelegramPrefix: (process.env.ACTION_TELEGRAM_PREFIX || "Drewe and I just talked about this so let's make sure that it happens:")
     .trim(),
   maxActionsPerResponse: Math.max(1, Number(process.env.MAX_ACTIONS_PER_RESPONSE || 1)),
@@ -100,6 +108,8 @@ const contextCache = {
   value: '',
   expiresAt: 0,
 };
+
+const githubDirectoryCache = new Map();
 
 const recentActionTimestamps = new Map();
 
@@ -433,35 +443,86 @@ async function fetchGithubContent(relativePath) {
   return null;
 }
 
+async function fetchGithubDirectoryIndex(relativeDir = '') {
+  const cacheKey = relativeDir || '.';
+  const cached = githubDirectoryCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.files;
+  }
+
+  const pathInRepo = joinGithubRootPath(relativeDir);
+  const suffix = pathInRepo ? `/contents/${pathInRepo}` : '/contents';
+  const url = `https://api.github.com/repos/${encodeURIComponent(config.githubBrainOwner)}/${encodeURIComponent(
+    config.githubBrainRepo,
+  )}${suffix}?ref=${encodeURIComponent(config.githubBrainBranch)}`;
+  const headers = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  if (config.githubBrainToken) {
+    headers.Authorization = `Bearer ${config.githubBrainToken}`;
+  }
+
+  const raw = await fetchTextWithTimeout(url, headers);
+  if (!raw) {
+    return new Map();
+  }
+  try {
+    const payload = JSON.parse(raw);
+    const files = new Map(
+      (Array.isArray(payload) ? payload : [])
+        .filter((item) => item?.type === 'file' && item?.name)
+        .map((item) => [item.name.toLowerCase(), item.name]),
+    );
+    githubDirectoryCache.set(cacheKey, {
+      files,
+      expiresAt: Date.now() + Math.max(60000, config.contextCacheTtlMs),
+    });
+    return files;
+  } catch (_err) {
+    return new Map();
+  }
+}
+
 async function collectExistingContextFiles() {
-  const entries = [];
-  for (const fileName of config.contextFiles) {
+  const githubFiles = config.githubBrainOwner && config.githubBrainRepo
+    ? await fetchGithubDirectoryIndex('')
+    : new Map();
+  const entries = await Promise.all(config.contextFiles.map(async (fileName) => {
     const variants = filenameVariants(fileName);
 
-    let found = false;
     for (const variant of variants) {
       const fullPath = path.join(config.brainDir, variant);
       const content = tryRead(fullPath);
       if (content) {
-        entries.push({ label: variant, content });
-        found = true;
-        break;
+        return { label: variant, content };
       }
     }
 
-    if (found) {
-      continue;
-    }
-
-    for (const variant of variants) {
-      const remoteContent = await fetchRemoteText(variant);
-      if (remoteContent) {
-        entries.push({ label: variant, content: remoteContent });
-        break;
+    const githubMatch = variants
+      .map((variant) => githubFiles.get(variant.toLowerCase()))
+      .find(Boolean);
+    if (githubMatch) {
+      const content = await fetchGithubContent(githubMatch);
+      if (content) {
+        return { label: githubMatch, content };
       }
     }
-  }
-  return entries;
+
+    const remoteResults = await Promise.all(variants.map(async (variant) => ({
+      variant,
+      content: config.brainRemoteBaseUrl ? await fetchTextWithTimeout(
+        `${config.brainRemoteBaseUrl}/${variant.replace(/^\/+/, '')}`,
+        config.brainRemoteAuthToken ? { Authorization: `Bearer ${config.brainRemoteAuthToken}` } : {},
+      ) : null,
+    })));
+    const remoteMatch = remoteResults.find((item) => item.content);
+    if (remoteMatch) {
+      return { label: remoteMatch.variant, content: remoteMatch.content };
+    }
+    return null;
+  }));
+  return entries.filter(Boolean);
 }
 
 async function collectRecentMemoryFiles() {
@@ -528,7 +589,7 @@ async function loadAssistantContext() {
   for (const item of await collectRecentMemoryFiles()) {
     sections.push(`=== ${item.label} ===\n${item.content}`);
   }
-  const contextText = clip(sections.join('\n\n'), 30000);
+  const contextText = clip(sections.join('\n\n'), Math.max(4000, config.contextMaxChars));
   contextCache.value = contextText;
   contextCache.expiresAt = Date.now() + Math.max(1000, config.contextCacheTtlMs);
   return contextText;
@@ -692,26 +753,70 @@ function toAnthropicMessages(messages) {
   }));
 }
 
+function uniqueModelCandidates(primary) {
+  return Array.from(new Set([primary, ...config.anthropicFallbackModels].filter(Boolean)));
+}
+
+function isRetryableAnthropicModelError(status, body) {
+  return status === 404 || status === 400 && /model|not_found/i.test(body);
+}
+
+async function fetchAnthropicWithFallback({ systemPrompt, messages, stream, primaryModel, maxTokens }) {
+  const candidates = uniqueModelCandidates(primaryModel);
+  let lastError = '';
+
+  for (const model of candidates) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.max(3000, config.llmTimeoutMs));
+    let response;
+    try {
+      response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': config.anthropicApiKey,
+          'anthropic-version': config.anthropicVersion,
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: maxTokens,
+          system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
+          messages: toAnthropicMessages(messages),
+          stream,
+        }),
+      });
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (response.ok) {
+      if (model !== primaryModel) {
+        console.warn(`[LLM] Recovered with fallback model=${model} after primary=${primaryModel}`);
+      }
+      return { response, model };
+    }
+
+    const body = await response.text();
+    lastError = `${response.status} ${body}`;
+    if (!isRetryableAnthropicModelError(response.status, body)) {
+      break;
+    }
+    console.warn(`[LLM] Unavailable model=${model}; trying fallback`);
+  }
+
+  throw new Error(`Anthropic request failed: ${lastError || 'no model candidates available'}`);
+}
+
 async function* streamFromAnthropic(systemPrompt, messages) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': config.anthropicApiKey,
-      'anthropic-version': config.anthropicVersion,
-    },
-    body: JSON.stringify({
-      model: config.llmModel,
-      max_tokens: config.llmMaxTokens,
-      system: systemPrompt,
-      messages: toAnthropicMessages(messages),
-      stream: true,
-    }),
+  const { response } = await fetchAnthropicWithFallback({
+    systemPrompt,
+    messages,
+    stream: true,
+    primaryModel: config.voiceLlmModel,
+    maxTokens: config.llmMaxTokens,
   });
 
-  if (!response.ok) {
-    throw new Error(`Anthropic stream failed: ${response.status} ${await response.text()}`);
-  }
   if (!response.body) {
     throw new Error('Anthropic stream failed: empty response body');
   }
@@ -757,24 +862,14 @@ async function* streamFromAnthropic(systemPrompt, messages) {
 }
 
 async function completeFromAnthropic(systemPrompt, messages) {
-  const response = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': config.anthropicApiKey,
-      'anthropic-version': config.anthropicVersion,
-    },
-    body: JSON.stringify({
-      model: config.llmModel,
-      max_tokens: config.llmMaxTokens,
-      system: systemPrompt,
-      messages: toAnthropicMessages(messages),
-    }),
+  const { response } = await fetchAnthropicWithFallback({
+    systemPrompt,
+    messages,
+    stream: false,
+    primaryModel: config.summaryLlmModel,
+    maxTokens: Math.max(config.llmMaxTokens, 320),
   });
 
-  if (!response.ok) {
-    throw new Error(`Anthropic call failed: ${response.status} ${await response.text()}`);
-  }
   const data = await response.json();
   return (data.content || [])
     .filter((item) => item && item.type === 'text')
@@ -1248,6 +1343,8 @@ app.get('/health', (_req, res) => {
     status: 'ok',
     provider: config.llmProvider,
     model: config.llmModel,
+    voiceModel: config.voiceLlmModel,
+    summaryModel: config.summaryLlmModel,
     brainDir: config.brainDir,
     memoryDir: config.memoryDir,
     remoteBrainBaseUrl: config.brainRemoteBaseUrl || null,
@@ -1260,6 +1357,36 @@ app.get('/health', (_req, res) => {
   });
 });
 
+async function fetchElevenLabsSessionCredential(agentId, type) {
+  const endpointPath = type === 'webrtc'
+    ? 'conversation/token'
+    : 'conversation/get_signed_url';
+  const endpoint = `https://api.elevenlabs.io/v1/convai/${endpointPath}?agent_id=${encodeURIComponent(agentId)}`;
+  const response = await fetch(endpoint, {
+    headers: { 'xi-api-key': config.elevenLabsApiKey },
+  });
+  if (!response.ok) {
+    throw new Error(`ElevenLabs returned ${response.status} ${await response.text()}`);
+  }
+  return response.json();
+}
+
+app.get('/conversation-token', async (req, res) => {
+  try {
+    if (!config.elevenLabsApiKey) {
+      return res.status(500).json({ error: 'ELEVENLABS_API_KEY is not configured.' });
+    }
+    const agentId = (req.query.agent_id || config.defaultAgentId || '').toString().trim();
+    if (!agentId) {
+      return res.status(400).json({ error: 'Missing agent_id.' });
+    }
+    return res.json(await fetchElevenLabsSessionCredential(agentId, 'webrtc'));
+  } catch (error) {
+    console.error(`[conversation-token] ${error.message}`);
+    return res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/signed-url', async (req, res) => {
   try {
     if (!config.elevenLabsApiKey) {
@@ -1270,15 +1397,7 @@ app.get('/signed-url', async (req, res) => {
       return res.status(400).json({ error: 'Missing agent_id.' });
     }
 
-    const endpoint = `https://api.elevenlabs.io/v1/convai/conversation/get_signed_url?agent_id=${encodeURIComponent(agentId)}`;
-    const response = await fetch(endpoint, {
-      headers: { 'xi-api-key': config.elevenLabsApiKey },
-    });
-    if (!response.ok) {
-      throw new Error(`ElevenLabs returned ${response.status} ${await response.text()}`);
-    }
-    const body = await response.json();
-    return res.json(body);
+    return res.json(await fetchElevenLabsSessionCredential(agentId, 'websocket'));
   } catch (error) {
     console.error(`[signed-url] ${error.message}`);
     return res.status(500).json({ error: error.message });
@@ -1317,6 +1436,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     let actionBuffer = '';
     let speechBuffer = '';
     let inAction = false;
+    let firstChunkAt = null;
 
     function shouldFlushSpeech(text) {
       return text.length >= 32 || /[\n.!?]$/.test(text) || (/\s$/.test(text) && text.length >= 12);
@@ -1342,6 +1462,10 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     for await (const chunk of streamModel(systemPrompt, messages)) {
+      if (!firstChunkAt) {
+        firstChunkAt = Date.now();
+        res.setHeader('Server-Timing', `prompt;dur=${firstChunkAt - start}`);
+      }
       fullText += chunk;
       for (const char of chunk) {
         if (char === '[' && !inAction) {
@@ -1384,7 +1508,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     res.end();
 
     await runActions(extractActions(fullText));
-    console.log(`[chat] completed in ${Date.now() - start}ms`);
+    console.log(`[chat] firstChunk=${firstChunkAt ? firstChunkAt - start : -1}ms total=${Date.now() - start}ms`);
   } catch (error) {
     console.error(`[chat] ${error.message}`);
     if (!res.headersSent) {
